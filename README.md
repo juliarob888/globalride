@@ -16,7 +16,9 @@ GlobalRide es una app de carpool para estudiantes de Global University. Este rep
 | `comparar_modelos.py` | Compara 6 algoritmos con la misma partición y validación cruzada (Avance 3) |
 | `comparacion_modelos.csv` / `.png` | Tabla y gráfica con los resultados de la comparación |
 | `modelo_globalride.joblib` | Modelo elegido, ya entrenado |
-| `app_globalride.py` | Interfaz web con Streamlit |
+| `app_globalride.py` | App web con Streamlit (acceso, mapa, tarifa y match con IA) |
+| `ags_datos.py` | Campus, puntos de encuentro de Aguascalientes, rutas y cálculo de tarifa |
+| `.streamlit/config.toml` | Tema oscuro de la app |
 
 ## Cómo ejecutarlo
 
@@ -66,3 +68,11 @@ GlobalRide es una app de carpool para estudiantes de Global University. Este rep
 - Perceptrón multicapa
 
 Además los compara con una línea base sencilla. El mejor modelo se elige por su **F1 en validación cruzada de 5 pliegues**, no por la prueba, y se guarda en `modelo_globalride.joblib`. La meta del proyecto es **F1 ≥ 0.80**.
+
+## La app
+
+- **Acceso**: correo institucional (`@globaluniversity.edu.mx`), nombre, matrícula y teléfono de 10 dígitos.
+- **Busco ride**: tocas el mapa donde estás y la app te sugiere el punto de encuentro más cercano, traza la ruta al campus, calcula tu cooperación y ordena a los conductores por probabilidad de match (modelo de ML).
+- **Doy ride**: tocas tu punto de salida y la app marca los puntos de encuentro que quedan sobre tu ruta y cuánto recuperas de gasolina.
+- **Tarifa**: `(gasolina del viaje + $0.90/km de desgaste) / ocupantes + $5`, mínimo $15. El precio por litro se edita en la barra lateral (referencia Ags: Magna $23.79, Premium $25.94, enero 2026).
+- Las rutas por calles vienen de OSRM (OpenStreetMap); sin internet se usa una estimación. Las coordenadas de campus y puntos son aproximadas y los conductores/pasajeros mostrados son de demostración.
