@@ -5,3 +5,7 @@ __pycache__/
 .idea/
 .vscode/
 .ipynb_checkpoints/
+
+# Datos privados de usuarios y contraseñas: nunca subir a GitHub
+*.db
+.streamlit/secrets.toml

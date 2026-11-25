@@ -6,3 +6,5 @@ joblib
 streamlit>=1.67
 folium
 streamlit-folium
+sqlalchemy
+psycopg2-binary

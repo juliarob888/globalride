@@ -11,6 +11,7 @@ Un solo comando:  streamlit run app_globalride.py
    Los datos de entrenamiento y los conductores de la demo son simulados.
 """
 import datetime as dt
+import json
 import re
 
 import folium
@@ -20,6 +21,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 import ags_datos as ags
+import db
 
 st.set_page_config(page_title="GlobalRide", page_icon="🚗", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -148,7 +150,7 @@ def pantalla_acceso():
         </div>
         <div class="gr-stats">
           <div><b>16</b><small>puntos de encuentro</small></div>
-          <div><b>2</b><small>campus</small></div>
+          <div><b>1</b><small>campus · Av. Independencia</small></div>
           <div><b>desde $15</b><small>por viaje, según km y gas</small></div>
         </div>
         """, unsafe_allow_html=True)
@@ -174,12 +176,17 @@ def pantalla_acceso():
                 for e in errores:
                     st.error(e)
             else:
-                st.session_state.usuario = {
+                usuario = {
                     "correo": correo.strip().lower(), "nombre": nombre.strip().title(),
                     "matricula": matricula.strip().upper(), "telefono": tel,
                     "rol": "pasajero" if "Busco" in rol else "conductor",
                 }
-                st.session_state.viajes = []
+                try:
+                    db.registrar_usuario(usuario)
+                except Exception as e:
+                    st.error(f"No pudimos guardar tu registro, intenta de nuevo. ({e.__class__.__name__})")
+                    return
+                st.session_state.usuario = usuario
                 st.rerun()
 
 
@@ -191,7 +198,7 @@ def mapa_base(alto_zoom=12):
                          attr="Map data © Google", name=nombre, max_zoom=20).add_to(m)
     folium.LayerControl(position="topright").add_to(m)
     for nombre, c in ags.CAMPUS.items():
-        folium.Marker(c["coord"], tooltip=f"🎓 {nombre}",
+        folium.Marker(c["coord"], tooltip=f"🎓 {nombre} · {c['direccion']}",
                       icon=folium.DivIcon(html=_pin("🎓", "#8b5cf6", 38), icon_size=(38, 38),
                                           icon_anchor=(19, 19))).add_to(m)
     for p in ags.PUNTOS:
@@ -229,8 +236,12 @@ def dibujar_mapa(m, clave):
 
 # ------------------------------------------------------------------ panel común
 def ajustes_viaje(prefijo):
+    campus = ags.CAMPUS_NOMBRE
     c1, c2, c3 = st.columns(3)
-    campus = c1.selectbox("Campus destino", list(ags.CAMPUS), key=f"{prefijo}_campus")
+    c1.markdown(f"""<div class="gr-card" style="padding:.6rem 1rem;margin:0">
+      <div class="gr-muted">🎓 Destino</div><b>{campus}</b>
+      <div class="gr-muted" style="font-size:.78rem">{ags.CAMPUS[campus]['direccion']}</div></div>""",
+                unsafe_allow_html=True)
     hoy = dt.date.today().weekday()
     dia = c2.selectbox("Día", DIAS, index=hoy if hoy < 5 else 0, key=f"{prefijo}_dia")
     hora = c3.time_input("Hora de salida", dt.time(7, 30), step=900, key=f"{prefijo}_hora")
@@ -314,7 +325,8 @@ def vista_pasajero(precio, tipo_gas):
     st.markdown(f"### Conductores que van a {campus} 🚘")
     hora_dec = a_decimal(hora)
     zona_o = ags.zona_de(recogida)
-    previos = len(st.session_state.viajes)
+    correo = st.session_state.usuario["correo"]
+    previos = db.contar_viajes(correo)
     lista = []
     for c in ags.conductores_cerca(recogida, hora_dec):
         tc = ags.tarifa(km, precio, c["rendimiento"], pasajeros=1)
@@ -346,10 +358,12 @@ def vista_pasajero(precio, tipo_gas):
             </div>""", unsafe_allow_html=True)
             if st.button(f"Pedir ride con {c['nombre']}", key=f"pedir_{i}", use_container_width=True,
                          type="primary" if i == 0 else "secondary"):
-                st.session_state.viajes.append({
-                    "Fecha": f"{dia} {a_hora(hora_dec)}", "Rol": "Pasajero", "Con": c["nombre"],
-                    "Recogida": nombre_recogida, "Destino": campus,
-                    "Km": round(km, 1), "Cooperación": f"${tc['por_pasajero']}"})
+                db.guardar_viaje(
+                    correo=correo, rol="pasajero", dia=dia, hora=a_hora(hora_dec),
+                    ubicacion_lat=yo[0], ubicacion_lon=yo[1],
+                    recogida_nombre=nombre_recogida, recogida_lat=recogida[0], recogida_lon=recogida[1],
+                    destino=campus, km=round(km, 2), cooperacion=tc["por_pasajero"],
+                    detalle=f"Con {c['nombre']} ({c['auto']}), sale {a_hora(c['hora'])}")
                 st.toast(f"¡Listo! {c['nombre']} te recoge en {nombre_recogida} a las {a_hora(c['hora'])} 🚗")
                 st.balloons()
 
@@ -374,7 +388,14 @@ def vista_conductor(precio, tipo_gas):
                 paradas.append(dict(p, desvio=d, esperando=ags.pasajeros_esperando(p["nombre"])))
         # ordenar en el sentido del viaje: lo más lejos del campus primero
         paradas.sort(key=lambda p: -ags.distancia_km(p["coord"], destino))
-        interesados = sum(len(p["esperando"]) for p in paradas)
+        reales = []
+        for _, r in db.pasajeros_esperando(dia).iterrows():
+            punto = (r["recogida_lat"], r["recogida_lon"])
+            d = ags.distancia_a_ruta(punto, linea)
+            if d <= radio:
+                reales.append({"nombre": r["nombre"], "lugar": r["recogida_nombre"], "coord": punto,
+                               "hora": r["hora"], "desvio": d})
+        interesados = sum(len(p["esperando"]) for p in paradas) + len(reales)
         llevar = min(asientos, interesados)
         t = ags.tarifa(km, precio, rendimiento, pasajeros=max(1, llevar))
 
@@ -391,7 +412,7 @@ def vista_conductor(precio, tipo_gas):
             m1, m2 = st.columns(2)
             m1.metric("Recuperas", f"${t['por_pasajero'] * llevar}", f"{llevar} pasajero(s)")
             m2.metric("Gas del viaje", f"${t['gasolina']:.0f}")
-            con_gente = [p["coord"] for p in paradas if p["esperando"]]
+            con_gente = [r["coord"] for r in reales] + [p["coord"] for p in paradas if p["esperando"]]
             st.link_button("🗺️ Navegar con Google Maps (con paradas)",
                            link_google_maps(salida, destino, con_gente), use_container_width=True)
 
@@ -408,12 +429,27 @@ def vista_conductor(precio, tipo_gas):
                 folium.Marker(p["coord"], tooltip=f"🚏 {p['nombre']} · {len(p['esperando'])} esperando",
                               icon=folium.DivIcon(html=_pin(str(len(p["esperando"])), "#c6f432", 26),
                                                   icon_size=(26, 26), icon_anchor=(13, 13))).add_to(m)
+            for r in reales:
+                folium.Marker(r["coord"], tooltip=f"🙋 {r['nombre']} · {r['lugar']} · {r['hora']}",
+                              icon=folium.DivIcon(html=_pin("🙋", "#ec4899", 28), icon_size=(28, 28),
+                                                  icon_anchor=(14, 14))).add_to(m)
             m.fit_bounds([salida, destino], padding=(40, 40))
         dibujar_mapa(m, "mapa_c")
         st.caption("🟢 Paradas sobre tu ruta (el número = estudiantes esperando) · Toca el mapa para cambiar tu salida.")
 
     if not salida:
         return
+    if reales:
+        st.markdown("### Estudiantes que pidieron ride sobre tu ruta 🙋")
+        cols = st.columns(3)
+        for i, r in enumerate(reales):
+            with cols[i % 3]:
+                st.markdown(f"""
+                <div class="gr-card">
+                  <span class="gr-badge gr-ok">Solicitud real · {dia} {r['hora']}</span>
+                  <h4 style="margin-top:.5rem">{r['nombre']}</h4>
+                  <div class="gr-muted">📍 {r['lugar']} · a {r['desvio'] * 1000:.0f} m de tu ruta</div>
+                </div>""", unsafe_allow_html=True)
     st.markdown("### Dónde puedes pasar por ellos 🚏")
     if not paradas:
         st.info("No hay puntos de encuentro sobre tu ruta. Sube el desvío máximo para ver más opciones.")
@@ -430,10 +466,14 @@ def vista_conductor(precio, tipo_gas):
               <div style="margin-top:.5rem">👥 {gente}</div>
             </div>""", unsafe_allow_html=True)
     if st.button("Publicar mi ride 🚀", type="primary", use_container_width=True):
-        st.session_state.viajes.append({
-            "Fecha": f"{dia} {hora.strftime('%H:%M')}", "Rol": "Conductor", "Con": f"{llevar} pasajero(s)",
-            "Recogida": ", ".join(p["nombre"] for p in paradas[:3]), "Destino": campus,
-            "Km": round(km, 1), "Cooperación": f"${t['por_pasajero']} c/u"})
+        puntos = ([{"nombre": p["nombre"], "lat": p["coord"][0], "lon": p["coord"][1]} for p in paradas]
+                  + [{"nombre": f"{r['nombre']} · {r['lugar']}", "lat": r["coord"][0], "lon": r["coord"][1]}
+                     for r in reales])
+        db.guardar_viaje(
+            correo=st.session_state.usuario["correo"], rol="conductor", dia=dia,
+            hora=hora.strftime("%H:%M"), ubicacion_lat=salida[0], ubicacion_lon=salida[1],
+            paradas=puntos, destino=campus, km=round(km, 2), cooperacion=t["por_pasajero"],
+            detalle=f"{asientos} lugar(es), rendimiento {rendimiento} km/L")
         st.toast("¡Ride publicado! Te avisamos cuando alguien se una 🙌")
         st.balloons()
 
@@ -470,14 +510,23 @@ def app():
     st.write("")
 
     nombres = ["🙋 Busco ride", "🚘 Doy ride", "🧾 Mis viajes"]
-    t_pas, t_con, t_mis = st.tabs(nombres, default=nombres[1] if u["rol"] == "conductor" else nombres[0])
+    admin = es_admin(u["correo"])
+    if admin:
+        nombres.append("🛠️ Base de datos")
+    pestanas = st.tabs(nombres, default=nombres[1] if u["rol"] == "conductor" else nombres[0])
+    t_pas, t_con, t_mis = pestanas[:3]
     with t_pas:
         vista_pasajero(precio, tipo_gas)
     with t_con:
         vista_conductor(precio, tipo_gas)
     with t_mis:
-        if st.session_state.viajes:
-            st.dataframe(pd.DataFrame(st.session_state.viajes), use_container_width=True, hide_index=True)
+        mis = db.viajes_de(u["correo"])
+        if len(mis):
+            vista = mis.rename(columns={"creado": "Registrado", "rol": "Rol", "dia": "Día", "hora": "Hora",
+                                        "recogida_nombre": "Recogida", "destino": "Destino", "km": "Km",
+                                        "cooperacion": "Cooperación $", "detalle": "Detalle"})
+            st.dataframe(vista[["Registrado", "Rol", "Día", "Hora", "Recogida", "Km", "Cooperación $", "Detalle"]],
+                         use_container_width=True, hide_index=True)
         else:
             st.info("Aún no tienes viajes. ¡Pide o publica tu primer ride!")
         st.markdown(f"""
@@ -487,8 +536,59 @@ def app():
           <div class="gr-fila"><span>Teléfono</span><b>{u['telefono']}</b></div>
         </div>""", unsafe_allow_html=True)
 
+    if admin:
+        with pestanas[3]:
+            panel_admin()
+
     st.caption("Modelo de match: regresión logística (F1 ≈ 0.80), entrenado con 1,000 viajes simulados. "
-               "Los conductores y pasajeros que ves son de demostración. Rutas: OpenStreetMap / OSRM.")
+               "Los conductores con calificación y auto son de demostración; las solicitudes marcadas "
+               "como «real» vienen de la base de datos. Rutas: OpenStreetMap / OSRM.")
+
+
+# ------------------------------------------------------------------ admin
+def es_admin(correo):
+    """Correos con acceso al panel, definidos en los Secrets: ADMIN_EMAILS = ["a@...", "b@..."]."""
+    try:
+        return correo in [c.strip().lower() for c in st.secrets["ADMIN_EMAILS"]]
+    except Exception:
+        return False
+
+
+def panel_admin():
+    if not db.es_permanente():
+        st.warning("La base de datos es un archivo local (SQLite). En Streamlit Cloud se borra cuando la app "
+                   "se reinicia. Para que sea permanente, agrega DATABASE_URL en los Secrets.")
+    us, vj = db.tabla("usuarios"), db.tabla("viajes")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Usuarios registrados", len(us))
+    m2.metric("Viajes registrados", len(vj))
+    m3.metric("Pasajeros", int((vj["rol"] == "pasajero").sum()) if len(vj) else 0)
+    m4.metric("Conductores", int((vj["rol"] == "conductor").sum()) if len(vj) else 0)
+
+    if len(vj):
+        st.markdown("#### Mapa de ubicaciones registradas")
+        m = mapa_base(alto_zoom=11)
+        for _, r in vj.iterrows():
+            if r["rol"] == "pasajero" and pd.notna(r["recogida_lat"]):
+                folium.CircleMarker((r["recogida_lat"], r["recogida_lon"]), radius=7, color="#ec4899",
+                                    fill=True, tooltip=f"🙋 Recogida: {r['recogida_nombre']} · {r['correo']}").add_to(m)
+            elif r["rol"] == "conductor" and pd.notna(r["ubicacion_lat"]):
+                folium.CircleMarker((r["ubicacion_lat"], r["ubicacion_lon"]), radius=7, color="#c6f432",
+                                    fill=True, tooltip=f"🚘 Salida conductor · {r['correo']}").add_to(m)
+                for pt in json.loads(r["paradas"] or "[]"):
+                    folium.CircleMarker((pt["lat"], pt["lon"]), radius=4, color="#22d3ee", fill=True,
+                                        tooltip=f"🚏 Puede recoger en: {pt['nombre']}").add_to(m)
+        st_folium(m, key="mapa_admin", height=450, use_container_width=True, returned_objects=[])
+        st.caption("🩷 Dónde recogen a pasajeros · 💚 De dónde salen conductores · 🩵 Dónde pueden recoger")
+
+    st.markdown("#### Usuarios")
+    st.dataframe(us, use_container_width=True, hide_index=True)
+    st.download_button("Descargar usuarios (CSV)", us.to_csv(index=False).encode("utf-8"),
+                       "usuarios_globalride.csv", "text/csv")
+    st.markdown("#### Viajes y ubicaciones")
+    st.dataframe(vj, use_container_width=True, hide_index=True)
+    st.download_button("Descargar viajes (CSV)", vj.to_csv(index=False).encode("utf-8"),
+                       "viajes_globalride.csv", "text/csv")
 
 
 if "usuario" not in st.session_state:

@@ -18,6 +18,7 @@ GlobalRide es una app de carpool para estudiantes de Global University. Este rep
 | `modelo_globalride.joblib` | Modelo elegido, ya entrenado |
 | `app_globalride.py` | App web con Streamlit (acceso, mapa, tarifa y match con IA) |
 | `ags_datos.py` | Campus, puntos de encuentro de Aguascalientes, rutas y cálculo de tarifa |
+| `db.py` | Base de datos: usuarios que entran y ubicaciones de cada viaje |
 | `.streamlit/config.toml` | Tema oscuro de la app |
 
 ## Cómo ejecutarlo
@@ -76,3 +77,19 @@ Además los compara con una línea base sencilla. El mejor modelo se elige por s
 - **Doy ride**: tocas tu punto de salida y la app marca los puntos de encuentro que quedan sobre tu ruta y cuánto recuperas de gasolina.
 - **Tarifa**: `(gasolina del viaje + $0.90/km de desgaste) / ocupantes + $5`, mínimo $15. El precio por litro se edita en la barra lateral (referencia Ags: Magna $23.79, Premium $25.94, enero 2026).
 - Las rutas por calles vienen de OSRM (OpenStreetMap); sin internet se usa una estimación. Las coordenadas de campus y puntos son aproximadas y los conductores/pasajeros mostrados son de demostración.
+
+## Base de datos
+
+`db.py` guarda en dos tablas:
+
+- **usuarios**: correo, nombre, matrícula, teléfono, rol, primer y último acceso, número de accesos.
+- **viajes**: cada ride pedido o publicado. Para el pasajero, dónde está y dónde lo recogen; para el conductor, de dónde sale y los puntos donde puede recoger (JSON).
+
+Campus único: **Global University**, Av. Independencia 2134, Trojes de Alonso, CP 20116, Aguascalientes.
+
+Por defecto se usa SQLite (`globalride.db`, ignorado por git). En Streamlit Cloud ese archivo se borra al reiniciar la app; para que los datos sean permanentes, agrega en **Settings → Secrets**:
+
+```toml
+DATABASE_URL = "postgresql://usuario:contraseña@host:5432/postgres"   # p. ej. Supabase
+ADMIN_EMAILS = ["tu.correo@globaluniversity.edu.mx"]                   # quién ve el panel 🛠️
+```

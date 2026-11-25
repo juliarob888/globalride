@@ -11,11 +11,16 @@ import urllib.request
 
 CENTRO_AGS = (21.8853, -102.2916)
 
-# Campus de destino (coinciden con zona_destino del modelo: "Centro" y "Norte")
+# Único campus: Global University, Av. Independencia 2134, Trojes de Alonso, CP 20116, Ags.
+# Coordenadas tomadas de OpenStreetMap. zona_destino "Norte" coincide con el modelo.
 CAMPUS = {
-    "Campus Centro": {"coord": (21.8840, -102.2950), "zona_destino": "Centro"},
-    "Campus Norte": {"coord": (21.9300, -102.2950), "zona_destino": "Norte"},
+    "Global University": {
+        "coord": (21.93326, -102.29810),
+        "direccion": "Av. Independencia 2134, Trojes de Alonso, CP 20116, Aguascalientes, Ags.",
+        "zona_destino": "Norte",
+    },
 }
+CAMPUS_NOMBRE = "Global University"
 
 # Centros de cada zona del modelo, para clasificar un punto del mapa
 ZONAS = {
