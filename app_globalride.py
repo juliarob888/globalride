@@ -13,6 +13,7 @@ Un solo comando:  streamlit run app_globalride.py
 import datetime as dt
 import json
 import re
+import urllib.parse
 
 import folium
 import joblib
@@ -117,6 +118,20 @@ def a_decimal(t):
 def a_hora(h):
     hh = int(h)
     return f"{hh:02d}:{int(round((h - hh) * 60)) % 60:02d}"
+
+
+def avisar(mensaje, globos=False):
+    """Guarda un aviso, recarga la página (para que todo se actualice) y lo muestra al volver."""
+    st.session_state["_aviso"] = (mensaje, globos)
+    st.rerun()
+
+
+def mostrar_aviso():
+    if "_aviso" in st.session_state:
+        mensaje, globos = st.session_state.pop("_aviso")
+        st.toast(mensaje)
+        if globos:
+            st.balloons()
 
 
 def iniciales(nombre):
@@ -389,35 +404,73 @@ def vista_pasajero(precio, tipo_gas):
     paso(2, "¿Cuándo vas?", f"🎓 {campus} · {ags.CAMPUS[campus]['direccion']}")
     dia, hora = cuando("p")
 
-    paso(3, "Tus matches", "Ordenados por la probabilidad de match que calcula la IA.")
+    paso(3, "Tus matches", "Conductores reales que pasan cerca de ti, ordenados por la IA.")
     hora_dec = a_decimal(hora)
     zona_o = ags.zona_de(recogida)
+    zona_d = ags.CAMPUS[campus]["zona_destino"]
     correo = st.session_state.usuario["correo"]
     previos = db.contar_viajes(correo)
-    lista = []
-    for c in ags.conductores_cerca(recogida, hora_dec):
-        tc = ags.tarifa(km, precio, c["rendimiento"], pasajeros=1)
-        p = prob_match(zona_o, ags.CAMPUS[campus]["zona_destino"], km, c["desvio_min"], c["hora"],
-                       abs(c["hora"] - hora_dec) * 60, dia, c["asientos"], tc["por_pasajero"],
-                       c["calificacion"], previos)
-        lista.append((p, c, tc))
-    lista.sort(key=lambda x: -x[0])
+    tc = ags.tarifa(km, precio, 14, pasajeros=1)
 
-    cols = st.columns(2)
-    for i, (p, c, tc) in enumerate(lista):
-        with cols[i % 2]:
-            tarjeta_conductor(c["nombre"], c["carrera"], f"⭐ {c['calificacion']} · {c['auto']} · "
-                              f"{c['asientos']} lugar(es) · sale {a_hora(c['hora'])}", tc["por_pasajero"], p)
-            if st.button(f"Pedir ride con {c['nombre']}", key=f"pedir_{i}", use_container_width=True,
-                         type="primary" if i == 0 else "secondary"):
-                db.guardar_viaje(
-                    correo=correo, rol="pasajero", dia=dia, hora=a_hora(hora_dec),
-                    ubicacion_lat=yo[0], ubicacion_lon=yo[1],
-                    recogida_nombre=nombre_recogida, recogida_lat=recogida[0], recogida_lon=recogida[1],
-                    destino=campus, km=round(km, 2), cooperacion=tc["por_pasajero"],
-                    detalle=f"Con {c['nombre']} ({c['auto']}), sale {a_hora(c['hora'])}")
-                st.toast(f"¡Listo! {c['nombre']} te recoge en {nombre_recogida} a las {a_hora(c['hora'])} 🚗")
-                st.balloons()
+    def guardar_solicitud():
+        db.guardar_viaje(correo=correo, rol="pasajero", dia=dia, hora=a_hora(hora_dec),
+                         ubicacion_lat=yo[0], ubicacion_lon=yo[1], recogida_nombre=nombre_recogida,
+                         recogida_lat=recogida[0], recogida_lon=recogida[1], destino=campus,
+                         km=round(km, 2), cooperacion=tc["por_pasajero"], detalle="Solicitud de ride")
+
+    reales = []
+    for _, c in db.conductores_disponibles(dia).iterrows():
+        if c["correo"] == correo or not c["ruta"]:
+            continue
+        d = ags.distancia_a_ruta(recogida, [tuple(x) for x in json.loads(c["ruta"])])
+        if d > 1.5:  # su ruta pasa a más de 1.5 km de donde te recogen
+            continue
+        h = int(c["hora"][:2]) + int(c["hora"][3:]) / 60
+        desvio_min = d * 2 / 25 * 60  # ir y regresar a ~25 km/h
+        asientos = int(c["asientos"] or 2)
+        p = prob_match(zona_o, zona_d, km, desvio_min, h, abs(h - hora_dec) * 60, dia, asientos,
+                       tc["por_pasajero"], 4.5, previos)
+        reales.append((p, c, d, h, asientos))
+    reales.sort(key=lambda x: -x[0])
+
+    if reales:
+        cols = st.columns(2)
+        for i, (p, c, d, h, asientos) in enumerate(reales):
+            with cols[i % 2]:
+                tarjeta_conductor(c["nombre"], f"sale {c['hora']}",
+                                  f"🚗 {asientos} lugar(es) · pasa a {d * 1000:.0f} m de tu punto",
+                                  tc["por_pasajero"], p, '<span class="gr-badge gr-ok">✅ Real</span>')
+                if st.button(f"🤝 Hacer match con {c['nombre'].split()[0]}", key=f"match_{c['correo']}",
+                             use_container_width=True, type="primary" if i == 0 else "secondary"):
+                    guardar_solicitud()
+                    _, nuevo = db.crear_match(correo, c["correo"], "pasajero", recogida_nombre=nombre_recogida,
+                                              recogida_lat=recogida[0], recogida_lon=recogida[1], dia=dia,
+                                              hora=c["hora"], cooperacion=tc["por_pasajero"], prob=round(p, 3))
+                    avisar("¡Match enviado! 🎉 Ve a la pestaña 💬 Matches para chatear." if nuevo
+                           else "Ya tienes un match con esta persona. Búscalo en 💬 Matches.", globos=nuevo)
+    else:
+        st.info(f"Todavía no hay conductores reales que pasen cerca de ti el **{dia}**. "
+                "Publica tu solicitud: los conductores la verán en su mapa y te podrán ofrecer ride.")
+
+    if st.button("📣 Publicar mi solicitud para que los conductores me vean", use_container_width=True,
+                 type="secondary" if reales else "primary", key="publicar_solicitud"):
+        guardar_solicitud()
+        st.toast(f"¡Listo! Los conductores que pasen por {nombre_recogida} te verán 🙌")
+
+    with st.expander("👀 Ver ejemplos de cómo se ven los matches"):
+        st.caption("Conductores de ejemplo (no son reales) para que veas cómo funciona la IA.")
+        ej = []
+        for c in ags.conductores_cerca(recogida, hora_dec):
+            tce = ags.tarifa(km, precio, c["rendimiento"], pasajeros=1)
+            p = prob_match(zona_o, zona_d, km, c["desvio_min"], c["hora"], abs(c["hora"] - hora_dec) * 60,
+                           dia, c["asientos"], tce["por_pasajero"], c["calificacion"], previos)
+            ej.append((p, c, tce))
+        cols = st.columns(2)
+        for i, (p, c, tce) in enumerate(sorted(ej, key=lambda x: -x[0])):
+            with cols[i % 2]:
+                tarjeta_conductor(c["nombre"], c["carrera"], f"⭐ {c['calificacion']} · {c['auto']} · "
+                                  f"{c['asientos']} lugar(es) · sale {a_hora(c['hora'])}", tce["por_pasajero"], p,
+                                  '<span class="gr-badge gr-meh">Ejemplo</span>')
 
 
 def tarjeta_conductor(nombre, sub, detalle, precio, p, etiqueta=""):
@@ -472,8 +525,10 @@ def vista_conductor(precio, tipo_gas):
         punto = (r["recogida_lat"], r["recogida_lon"])
         d = ags.distancia_a_ruta(punto, linea)
         if d <= radio:
-            reales.append({"nombre": r["nombre"], "lugar": r["recogida_nombre"], "coord": punto,
-                           "hora": r["hora"], "desvio": d})
+            if r["correo"] != st.session_state.usuario["correo"]:
+                reales.append({"correo": r["correo"], "nombre": r["nombre"], "lugar": r["recogida_nombre"],
+                               "coord": punto, "hora": r["hora"], "desvio": d})
+    reales = list({r["correo"]: r for r in reales}.values())  # una tarjeta por estudiante
     interesados = sum(len(p["esperando"]) for p in paradas) + len(reales)
     llevar = min(asientos, interesados)
     t = ags.tarifa(km, precio, rendimiento, pasajeros=max(1, llevar))
@@ -514,6 +569,18 @@ def vista_conductor(precio, tipo_gas):
                   <h4 style="margin-top:.5rem">{r['nombre']}</h4>
                   <div class="gr-muted">📍 {r['lugar']} · a {r['desvio'] * 1000:.0f} m de tu ruta</div>
                 </div>""", unsafe_allow_html=True)
+                if st.button(f"🤝 Ofrecer ride a {r['nombre'].split()[0]}", key=f"ofrecer_{r['correo']}",
+                             use_container_width=True, type="primary"):
+                    h = int(r["hora"][:2]) + int(r["hora"][3:]) / 60
+                    p = prob_match(ags.zona_de(r["coord"]), ags.CAMPUS[campus]["zona_destino"], km,
+                                   r["desvio"] * 2 / 25 * 60, a_decimal(hora), abs(h - a_decimal(hora)) * 60,
+                                   dia, asientos, t["por_pasajero"], 4.5, 0)
+                    _, nuevo = db.crear_match(r["correo"], st.session_state.usuario["correo"], "conductor",
+                                              recogida_nombre=r["lugar"], recogida_lat=r["coord"][0],
+                                              recogida_lon=r["coord"][1], dia=dia, hora=hora.strftime("%H:%M"),
+                                              cooperacion=t["por_pasajero"], prob=round(p, 3))
+                    avisar("¡Ride ofrecido! 🎉 Ve a 💬 Matches para chatear." if nuevo
+                           else "Ya tienes un match con esta persona. Búscalo en 💬 Matches.", globos=nuevo)
     st.markdown("#### Dónde puedes pasar por ellos 🚏")
     if not paradas:
         st.info("No hay puntos de encuentro sobre tu ruta. Sube el desvío máximo para ver más opciones.")
@@ -528,6 +595,7 @@ def vista_conductor(precio, tipo_gas):
               <div class="gr-muted">A {p['desvio'] * 1000:.0f} m de tu ruta</div>
               <div style="margin-top:.5rem">👥 {gente}</div>
             </div>""", unsafe_allow_html=True)
+    st.caption("Publica tu ride para que los pasajeros de tu ruta te vean en sus matches.")
     if st.button("Publicar mi ride 🚀", type="primary", use_container_width=True):
         puntos = ([{"nombre": p["nombre"], "lat": p["coord"][0], "lon": p["coord"][1]} for p in paradas]
                   + [{"nombre": f"{r['nombre']} · {r['lugar']}", "lat": r["coord"][0], "lon": r["coord"][1]}
@@ -536,14 +604,16 @@ def vista_conductor(precio, tipo_gas):
             correo=st.session_state.usuario["correo"], rol="conductor", dia=dia,
             hora=hora.strftime("%H:%M"), ubicacion_lat=salida[0], ubicacion_lon=salida[1],
             paradas=puntos, destino=campus, km=round(km, 2), cooperacion=t["por_pasajero"],
-            detalle=f"{asientos} lugar(es), rendimiento {rendimiento} km/L")
-        st.toast("¡Ride publicado! Te avisamos cuando alguien se una 🙌")
+            detalle=f"{asientos} lugar(es), rendimiento {rendimiento} km/L", asientos=asientos,
+            ruta=json.dumps([[round(a, 5), round(b, 5)] for a, b in linea[::max(1, len(linea) // 150)] + [linea[-1]]]))
+        st.toast("¡Ride publicado! Los pasajeros que estén en tu ruta te verán en sus matches 🙌")
         st.balloons()
 
 
 # ------------------------------------------------------------------ app
 def app():
     u = st.session_state.usuario
+    mostrar_aviso()
 
     with st.sidebar:
         st.markdown("### ⛽ Precio de la gasolina")
@@ -572,12 +642,16 @@ def app():
         </div>""", unsafe_allow_html=True)
     st.write("")
 
-    nombres = ["🙋 Busco ride", "🚘 Doy ride", "🧾 Mis viajes"]
+    mis_matches = db.matches_de(u["correo"])
+    activos = int((mis_matches["estado"] != "rechazado").sum()) if len(mis_matches) else 0
+    nombres = ["🙋 Busco ride", "🚘 Doy ride", f"💬 Matches ({activos})", "🧾 Mis viajes"]
     admin = es_admin(u["correo"])
     if admin:
         nombres.append("🛠️ Base de datos")
     pestanas = st.tabs(nombres, default=nombres[1] if u["rol"] == "conductor" else nombres[0])
-    t_pas, t_con, t_mis = pestanas[:3]
+    t_pas, t_con, t_match, t_mis = pestanas[:4]
+    with t_match:
+        vista_matches(u, mis_matches)
     with t_pas:
         vista_pasajero(precio, tipo_gas)
     with t_con:
@@ -600,12 +674,109 @@ def app():
         </div>""", unsafe_allow_html=True)
 
     if admin:
-        with pestanas[3]:
+        with pestanas[4]:
             panel_admin()
 
     st.caption("Modelo de match: regresión logística (F1 ≈ 0.80), entrenado con 1,000 viajes simulados. "
                "Los conductores con calificación y auto son de demostración; las solicitudes marcadas "
                "como «real» vienen de la base de datos. Rutas: OpenStreetMap / OSRM.")
+
+
+# ------------------------------------------------------------------ matches y chat
+ESTADOS = {"pendiente": "⏳ Pendiente", "aceptado": "✅ Aceptado", "rechazado": "❌ Rechazado"}
+
+
+def vista_matches(u, df):
+    yo = u["correo"]
+    if not len(df):
+        st.info("Aún no tienes matches. En **🙋 Busco ride** o **🚘 Doy ride** toca **🤝 Hacer match** "
+                "u **Ofrecer ride** y aquí podrás chatear para ponerse de acuerdo.")
+        return
+
+    def otro(r):
+        soy_pasajero = r["pasajero"] == yo
+        return {"rol": "Conductor" if soy_pasajero else "Pasajero",
+                "nombre": r["nombre_conductor"] if soy_pasajero else r["nombre_pasajero"],
+                "tel": r["tel_conductor"] if soy_pasajero else r["tel_pasajero"],
+                "emoji": "🚘" if soy_pasajero else "🙋"}
+
+    etiquetas = {int(r["id"]): f"{otro(r)['emoji']} {otro(r)['nombre']} · {r['dia']} {r['hora']} · "
+                               f"{ESTADOS.get(r['estado'], r['estado'])}" for _, r in df.iterrows()}
+    mid = st.selectbox("Elige un match", list(etiquetas), format_func=etiquetas.get, key="match_sel")
+    r = df[df["id"] == mid].iloc[0]
+    o = otro(r)
+    iniciaste = (r["iniciado_por"] == "pasajero") == (r["pasajero"] == yo)
+
+    izq, der = st.columns([1, 1.3], gap="large")
+    with izq:
+        st.markdown(f"""
+        <div class="gr-card">
+          <div class="gr-driver">
+            <div class="gr-avatar">{o['nombre'][:2].upper()}</div>
+            <div style="flex:1"><b>{o['nombre']}</b><br><span class="gr-muted">{o['rol']}</span></div>
+            <span class="gr-badge {'gr-ok' if r['estado'] == 'aceptado' else 'gr-meh'}">{ESTADOS[r['estado']]}</span>
+          </div>
+          <div style="margin-top:.8rem">
+          <div class="gr-fila"><span>📍 Te recogen / recoges en</span><b>{r['recogida_nombre']}</b></div>
+          <div class="gr-fila"><span>🗓️ Cuándo</span><b>{r['dia']} {r['hora']}</b></div>
+          <div class="gr-fila"><span>💸 Cooperación</span><b>${r['cooperacion']:.0f}</b></div>
+          <div class="gr-fila"><span>🤖 Match según la IA</span><b>{r['prob'] * 100:.0f}%</b></div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.link_button("🗺️ Ver punto de recogida en Google Maps",
+                       f"https://www.google.com/maps/search/?api=1&query={r['recogida_lat']},{r['recogida_lon']}",
+                       use_container_width=True)
+
+        if r["estado"] == "pendiente" and not iniciaste:
+            st.markdown(f"**{o['nombre'].split()[0]}** quiere hacer match contigo:")
+            a, b = st.columns(2)
+            if a.button("✅ Aceptar", type="primary", use_container_width=True, key=f"acep_{mid}"):
+                db.cambiar_estado(mid, "aceptado")
+                db.enviar_mensaje(mid, yo, "✅ ¡Acepté el match! Nos vemos 🙌")
+                st.rerun()
+            if b.button("❌ Rechazar", use_container_width=True, key=f"rech_{mid}"):
+                db.cambiar_estado(mid, "rechazado")
+                st.rerun()
+        elif r["estado"] == "pendiente":
+            st.info(f"Esperando a que **{o['nombre'].split()[0]}** acepte. Mientras, pueden chatear 👉")
+        elif r["estado"] == "aceptado":
+            tel = str(o["tel"])
+            texto = urllib.parse.quote(f"¡Hola {o['nombre'].split()[0]}! Soy {u['nombre'].split()[0]} de "
+                                       f"GlobalRide 🚗, hicimos match para el {r['dia']} a las {r['hora']}.")
+            st.markdown(f"📱 Teléfono de {o['nombre'].split()[0]}: **{tel[:3]} {tel[3:6]} {tel[6:]}**")
+            a, b = st.columns(2)
+            a.link_button("📞 Llamar", f"tel:+52{tel}", use_container_width=True)
+            b.link_button("💬 WhatsApp", f"https://wa.me/52{tel}?text={texto}", use_container_width=True)
+        else:
+            st.warning("Este match fue rechazado. Busca otro en **🙋 Busco ride** o **🚘 Doy ride**.")
+        if r["estado"] != "aceptado":
+            st.caption("🔒 El teléfono se muestra cuando el match es aceptado.")
+
+    with der:
+        chat(mid, yo, o, activo=r["estado"] != "rechazado")
+
+
+@st.fragment(run_every="5s")
+def chat(mid, yo, o, activo=True):
+    """Chat del match. Se actualiza solo cada 5 segundos."""
+    st.markdown(f"#### 💬 Chat con {o['nombre'].split()[0]}")
+    caja = st.container(height=360)  # se llena al final, ya con el mensaje nuevo guardado
+    if activo:
+        with st.form(f"form_chat_{mid}", clear_on_submit=True, border=False):
+            c1, c2 = st.columns([4, 1], vertical_alignment="bottom")
+            msg = c1.text_input("Mensaje", placeholder="Escribe un mensaje…", label_visibility="collapsed")
+            if c2.form_submit_button("Enviar ➤", use_container_width=True) and msg.strip():
+                db.enviar_mensaje(mid, yo, msg.strip())
+    msgs = db.mensajes_de(mid)
+    with caja:
+        if not len(msgs):
+            st.caption("Escribe el primer mensaje para ponerse de acuerdo 👇 (hora, lugar, cooperación…)")
+        for _, m in msgs.iterrows():
+            mio = m["de"] == yo
+            with st.chat_message("user" if mio else "assistant", avatar="🙂" if mio else o["emoji"]):
+                st.markdown(f"{m['texto']}  \n<span class='gr-muted' style='font-size:.75rem'>"
+                            f"{pd.to_datetime(m['creado']).strftime('%d/%m %H:%M')}</span>",
+                            unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------ admin
@@ -648,6 +819,9 @@ def panel_admin():
     st.dataframe(us, use_container_width=True, hide_index=True)
     st.download_button("Descargar usuarios (CSV)", us.to_csv(index=False).encode("utf-8"),
                        "usuarios_globalride.csv", "text/csv")
+    mt = db.tabla("matches")
+    st.markdown(f"#### Matches ({len(mt)}) · Mensajes ({len(db.tabla('mensajes'))})")
+    st.dataframe(mt, use_container_width=True, hide_index=True)
     st.markdown("#### Viajes y ubicaciones")
     st.dataframe(vj, use_container_width=True, hide_index=True)
     st.download_button("Descargar viajes (CSV)", vj.to_csv(index=False).encode("utf-8"),

@@ -73,8 +73,9 @@ Además los compara con una línea base sencilla. El mejor modelo se elige por s
 ## La app
 
 - **Acceso**: correo institucional (`@globaluniversity.edu.mx`), nombre, matrícula y teléfono de 10 dígitos.
-- **Busco ride**: tocas el mapa donde estás y la app te sugiere el punto de encuentro más cercano, traza la ruta al campus, calcula tu cooperación y ordena a los conductores por probabilidad de match (modelo de ML).
-- **Doy ride**: tocas tu punto de salida y la app marca los puntos de encuentro que quedan sobre tu ruta y cuánto recuperas de gasolina.
+- **Busco ride** (3 pasos): eliges dónde te recogen (lista de puntos de encuentro, escribiendo tu colonia, con el GPS del celular o tocando el mapa), cuándo vas, y ves tus **matches**: conductores reales cuya ruta pasa cerca, ordenados por la probabilidad que calcula el modelo de ML.
+- **Doy ride** (3 pasos): eliges de dónde sales, cuándo y cuántos lugares tienes; la app traza tu ruta, marca los puntos de encuentro y los estudiantes reales que pidieron ride sobre ella, y puedes **ofrecerles ride**.
+- **💬 Matches**: cada match (pendiente → aceptado/rechazado) tiene un **chat** dentro de la app. Al aceptarse, se muestra el teléfono con botones para **llamar** o escribir por **WhatsApp**.
 - **Tarifa**: `(gasolina del viaje + $0.90/km de desgaste) / ocupantes + $5`, mínimo $15. El precio por litro se edita en la barra lateral (referencia Ags: Magna $23.79, Premium $25.94, enero 2026).
 - Las rutas por calles vienen de OSRM (OpenStreetMap); sin internet se usa una estimación. Las coordenadas de campus y puntos son aproximadas y los conductores/pasajeros mostrados son de demostración.
 
@@ -83,7 +84,9 @@ Además los compara con una línea base sencilla. El mejor modelo se elige por s
 `db.py` guarda en dos tablas:
 
 - **usuarios**: correo, nombre, matrícula, teléfono, rol, primer y último acceso, número de accesos.
-- **viajes**: cada ride pedido o publicado. Para el pasajero, dónde está y dónde lo recogen; para el conductor, de dónde sale y los puntos donde puede recoger (JSON).
+- **viajes**: cada ride pedido o publicado. Para el pasajero, dónde está y dónde lo recogen; para el conductor, de dónde sale, su ruta y los puntos donde puede recoger (JSON).
+- **matches**: pasajero + conductor emparejados, quién lo inició, punto de recogida, probabilidad de la IA y estado.
+- **mensajes**: el chat de cada match.
 
 Campus único: **Global University**, Av. Independencia 2134, Trojes de Alonso, CP 20116, Aguascalientes.
 

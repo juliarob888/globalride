@@ -5,7 +5,9 @@ Guarda:
   - usuarios: quién entra a la app (correo, nombre, matrícula, teléfono, rol).
   - viajes:   cada ride pedido o publicado, con las ubicaciones:
               * pasajero  -> dónde está y dónde lo recogen
-              * conductor -> de dónde sale y los puntos donde puede recoger
+              * conductor -> de dónde sale, su ruta y los puntos donde puede recoger
+  - matches:  pasajero + conductor que se emparejaron (pendiente / aceptado / rechazado)
+  - mensajes: el chat de cada match
 
 Por defecto usa un archivo SQLite (globalride.db). Para que los datos NO se borren
 en Streamlit Cloud, agrega en los "Secrets" de la app una base en internet, p. ej.:
@@ -17,7 +19,7 @@ import json
 import pandas as pd
 import streamlit as st
 from sqlalchemy import (Column, DateTime, Float, Integer, MetaData, String, Table, Text,
-                        create_engine, func, select, update)
+                        create_engine, func, inspect, or_, select, text, update)
 
 meta = MetaData()
 
@@ -51,6 +53,34 @@ viajes = Table(
     Column("km", Float),
     Column("cooperacion", Float),
     Column("detalle", String(200)),            # con quién va / cuántos lugares
+    Column("ruta", Text),                      # conductor: JSON con la ruta [[lat, lon], ...]
+    Column("asientos", Integer),               # conductor: lugares libres
+)
+
+matches = Table(
+    "matches", meta,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("pasajero", String(120), index=True),
+    Column("conductor", String(120), index=True),
+    Column("iniciado_por", String(15)),        # pasajero | conductor
+    Column("recogida_nombre", String(120)),
+    Column("recogida_lat", Float),
+    Column("recogida_lon", Float),
+    Column("dia", String(12)),
+    Column("hora", String(5)),
+    Column("cooperacion", Float),
+    Column("prob", Float),                     # probabilidad de match que calculó la IA
+    Column("estado", String(12), default="pendiente"),
+    Column("creado", DateTime),
+)
+
+mensajes = Table(
+    "mensajes", meta,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("match_id", Integer, index=True),
+    Column("de", String(120)),
+    Column("texto", Text),
+    Column("creado", DateTime),
 )
 
 
@@ -68,6 +98,12 @@ def motor():
         url = url.replace("postgres://", "postgresql://", 1)
     eng = create_engine(url, pool_pre_ping=True)
     meta.create_all(eng)
+    # Si la tabla viajes ya existía de una versión anterior, le agregamos las columnas nuevas
+    existentes = {c["name"] for c in inspect(eng).get_columns("viajes")}
+    with eng.begin() as c:
+        for col, tipo in [("ruta", "TEXT"), ("asientos", "INTEGER")]:
+            if col not in existentes:
+                c.execute(text(f"ALTER TABLE viajes ADD COLUMN {col} {tipo}"))
     return eng
 
 
@@ -113,14 +149,70 @@ def contar_viajes(correo):
 def pasajeros_esperando(dia, dias_atras=7):
     """Pasajeros reales que pidieron ride ese día de la semana en los últimos días."""
     desde = ahora() - dt.timedelta(days=dias_atras)
-    q = (select(viajes.c.recogida_nombre, viajes.c.recogida_lat, viajes.c.recogida_lon,
+    q = (select(viajes.c.correo, viajes.c.recogida_nombre, viajes.c.recogida_lat, viajes.c.recogida_lon,
                 viajes.c.hora, usuarios.c.nombre)
          .join(usuarios, usuarios.c.correo == viajes.c.correo)
          .where(viajes.c.rol == "pasajero", viajes.c.dia == dia, viajes.c.creado >= desde))
     return pd.read_sql(q, motor())
 
 
+def conductores_disponibles(dia, dias_atras=7):
+    """Rides publicados por conductores reales para ese día de la semana (con su ruta)."""
+    desde = ahora() - dt.timedelta(days=dias_atras)
+    q = (select(viajes.c.id, viajes.c.correo, viajes.c.hora, viajes.c.ruta, viajes.c.asientos,
+                viajes.c.detalle, usuarios.c.nombre)
+         .join(usuarios, usuarios.c.correo == viajes.c.correo)
+         .where(viajes.c.rol == "conductor", viajes.c.dia == dia, viajes.c.creado >= desde)
+         .order_by(viajes.c.creado.desc()))
+    df = pd.read_sql(q, motor())
+    return df.drop_duplicates("correo")  # el ride más reciente de cada conductor
+
+
+def crear_match(pasajero, conductor, iniciado_por, **datos):
+    """Crea el match (o regresa el que ya existe entre esas dos personas ese día)."""
+    with motor().begin() as c:
+        ya = c.execute(select(matches.c.id).where(
+            matches.c.pasajero == pasajero, matches.c.conductor == conductor,
+            matches.c.dia == datos.get("dia"), matches.c.estado.in_(["pendiente", "aceptado"]))).scalar()
+        if ya:
+            return ya, False
+        r = c.execute(matches.insert().values(pasajero=pasajero, conductor=conductor,
+                                              iniciado_por=iniciado_por, estado="pendiente",
+                                              creado=ahora(), **datos))
+        return r.inserted_primary_key[0], True
+
+
+def matches_de(correo):
+    """Matches donde participa la persona, con nombre y teléfono de ambos."""
+    up, uc = usuarios.alias("up"), usuarios.alias("uc")
+    q = (select(matches, up.c.nombre.label("nombre_pasajero"), up.c.telefono.label("tel_pasajero"),
+                uc.c.nombre.label("nombre_conductor"), uc.c.telefono.label("tel_conductor"))
+         .join(up, up.c.correo == matches.c.pasajero)
+         .join(uc, uc.c.correo == matches.c.conductor)
+         .where(or_(matches.c.pasajero == correo, matches.c.conductor == correo))
+         .order_by(matches.c.creado.desc()))
+    return pd.read_sql(q, motor())
+
+
+def cambiar_estado(match_id, estado):
+    with motor().begin() as c:
+        c.execute(update(matches).where(matches.c.id == match_id).values(estado=estado))
+
+
+def enviar_mensaje(match_id, de, texto_msg):
+    with motor().begin() as c:
+        c.execute(mensajes.insert().values(match_id=match_id, de=de, texto=texto_msg[:500], creado=ahora()))
+
+
+def mensajes_de(match_id):
+    q = select(mensajes).where(mensajes.c.match_id == match_id).order_by(mensajes.c.id)
+    return pd.read_sql(q, motor())
+
+
+TABLAS = {"usuarios": usuarios, "viajes": viajes, "matches": matches, "mensajes": mensajes}
+
+
 def tabla(nombre):
-    t = usuarios if nombre == "usuarios" else viajes
+    t = TABLAS[nombre]
     orden = t.c.ultimo_acceso if nombre == "usuarios" else t.c.creado
     return pd.read_sql(select(t).order_by(orden.desc()), motor())
