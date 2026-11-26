@@ -317,7 +317,7 @@ def pantalla_acceso():
     izq, der = st.columns([1.15, 1], gap="large")
     with izq:
         st.markdown("""
-        <div class="gr-logo">🚗 <span>GlobalRide</span></div>
+        <div style="display:flex;align-items:center;gap:12px;"><svg width="48" height="48" viewBox="0 0 56 56"><rect width="56" height="56" rx="14" fill="#8B5CF6"/><path d="M8 40 C16 40, 20 30, 28 30 S40 22, 48 22" stroke="#2DD4BF" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="8" cy="40" r="3" fill="#2DD4BF"/><circle cx="48" cy="22" r="3" fill="#2DD4BF"/><path d="M16 28 L19 21 Q20 19 22 19 L34 19 Q36 19 37 21 L40 28 L40 34 L16 34 Z" fill="#FFFFFF"/><rect x="21" y="23" width="14" height="4" rx="1" fill="#8B5CF6"/><circle cx="21" cy="35" r="3" fill="#8B5CF6"/><circle cx="35" cy="35" r="3" fill="#8B5CF6"/></svg><span style="font-size:22px;font-weight:800;color:#FFFFFF;">GlobalRide</span></div>
         <div class="gr-hero">Llega a la uni<br>sin gastar <em>de más.</em></div>
         <p class="gr-sub">Comparte ride con gente de tu universidad. Tú marcas dónde estás,
         nosotros te decimos dónde te recogen y cuánto te toca poner de gas. Sin sorpresas.</p>
@@ -792,7 +792,7 @@ def app():
     with h1:
         st.markdown(f"""
         <div style="display:flex;align-items:center;gap:1rem">
-          <div class="gr-logo">🚗 <span>GlobalRide</span></div>
+          <div style="display:flex;align-items:center;gap:12px;"><svg width="48" height="48" viewBox="0 0 56 56"><rect width="56" height="56" rx="14" fill="#8B5CF6"/><path d="M8 40 C16 40, 20 30, 28 30 S40 22, 48 22" stroke="#2DD4BF" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="8" cy="40" r="3" fill="#2DD4BF"/><circle cx="48" cy="22" r="3" fill="#2DD4BF"/><path d="M16 28 L19 21 Q20 19 22 19 L34 19 Q36 19 37 21 L40 28 L40 34 L16 34 Z" fill="#FFFFFF"/><rect x="21" y="23" width="14" height="4" rx="1" fill="#8B5CF6"/><circle cx="21" cy="35" r="3" fill="#8B5CF6"/><circle cx="35" cy="35" r="3" fill="#8B5CF6"/></svg><span style="font-size:22px;font-weight:800;color:#FFFFFF;">GlobalRide</span></div>
           <span class="gr-badge gr-pin">⛽ {tipo_gas.split()[0]} ${precio:.2f}/L</span>
         </div>""", unsafe_allow_html=True)
     with h2:
