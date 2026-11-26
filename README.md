@@ -72,7 +72,9 @@ Además los compara con una línea base sencilla. El mejor modelo se elige por s
 
 ## La app
 
-- **Acceso**: correo institucional (`@globaluniversity.edu.mx`), nombre, matrícula y teléfono de 10 dígitos.
+- **Cuenta**: se crea una sola vez (correo institucional `@globaluniversity.edu.mx`, nombre, matrícula, teléfono de 10 dígitos y una clave). La clave se guarda cifrada (PBKDF2 con sal), nunca en texto.
+- **Entrar de nuevo**: el teléfono queda recordado; solo se pide la clave (en iPhone, Safari puede llenarla con Face ID desde el llavero). Tras 5 intentos fallidos hay que esperar 60 s.
+- **Un solo teléfono por cuenta**: si la cuenta está abierta en otro teléfono no deja entrar; con la clave correcta se puede cerrar la sesión del otro teléfono (por si se pierde). Cerrar sesión libera el teléfono.
 - **Busco ride** (3 pasos): eliges dónde te recogen (lista de puntos de encuentro, escribiendo tu colonia, con el GPS del celular o tocando el mapa), cuándo vas, y ves tus **matches**: conductores reales cuya ruta pasa cerca, ordenados por la probabilidad que calcula el modelo de ML.
 - **Doy ride** (3 pasos): eliges de dónde sales, cuándo y cuántos lugares tienes; la app traza tu ruta, marca los puntos de encuentro y los estudiantes reales que pidieron ride sobre ella, y puedes **ofrecerles ride**.
 - **💬 Matches**: cada match (pendiente → aceptado/rechazado) tiene un **chat** dentro de la app. Al aceptarse, se muestra el teléfono con botones para **llamar** o escribir por **WhatsApp**.

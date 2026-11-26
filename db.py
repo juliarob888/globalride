@@ -2,7 +2,9 @@
 db.py - Base de datos de GlobalRide
 
 Guarda:
-  - usuarios: quién entra a la app (correo, nombre, matrícula, teléfono, rol).
+  - usuarios: cuentas (correo, nombre, matrícula, teléfono, rol, clave cifrada) y en qué
+              teléfono está abierta cada una (solo se permite uno a la vez).
+  - dispositivos: qué cuenta usó por última vez cada teléfono, para no volver a pedir todo.
   - viajes:   cada ride pedido o publicado, con las ubicaciones:
               * pasajero  -> dónde está y dónde lo recogen
               * conductor -> de dónde sale, su ruta y los puntos donde puede recoger
@@ -14,7 +16,10 @@ en Streamlit Cloud, agrega en los "Secrets" de la app una base en internet, p. e
     DATABASE_URL = "postgresql://usuario:contraseña@host:5432/postgres"
 """
 import datetime as dt
+import hashlib
+import hmac
 import json
+import secrets
 
 import pandas as pd
 import streamlit as st
@@ -33,6 +38,17 @@ usuarios = Table(
     Column("primer_acceso", DateTime),
     Column("ultimo_acceso", DateTime),
     Column("accesos", Integer, default=1),
+    Column("clave_hash", String(128)),        # la clave NUNCA se guarda tal cual, solo su hash
+    Column("clave_sal", String(64)),
+    Column("dispositivo_activo", String(64)), # el único teléfono donde la cuenta está abierta
+    Column("sesion_desde", DateTime),
+)
+
+dispositivos = Table(
+    "dispositivos", meta,
+    Column("id", String(64), primary_key=True),   # identificador guardado en el navegador del teléfono
+    Column("correo", String(120)),
+    Column("ultimo_uso", DateTime),
 )
 
 viajes = Table(
@@ -98,12 +114,16 @@ def motor():
         url = url.replace("postgres://", "postgresql://", 1)
     eng = create_engine(url, pool_pre_ping=True)
     meta.create_all(eng)
-    # Si la tabla viajes ya existía de una versión anterior, le agregamos las columnas nuevas
-    existentes = {c["name"] for c in inspect(eng).get_columns("viajes")}
-    with eng.begin() as c:
-        for col, tipo in [("ruta", "TEXT"), ("asientos", "INTEGER")]:
-            if col not in existentes:
-                c.execute(text(f"ALTER TABLE viajes ADD COLUMN {col} {tipo}"))
+    # Si las tablas ya existían de una versión anterior, les agregamos las columnas nuevas
+    nuevas = {"viajes": [("ruta", "TEXT"), ("asientos", "INTEGER")],
+              "usuarios": [("clave_hash", "VARCHAR(128)"), ("clave_sal", "VARCHAR(64)"),
+                           ("dispositivo_activo", "VARCHAR(64)"), ("sesion_desde", "TIMESTAMP")]}
+    for tabla_n, cols in nuevas.items():
+        existentes = {c["name"] for c in inspect(eng).get_columns(tabla_n)}
+        with eng.begin() as c:
+            for col, tipo in cols:
+                if col not in existentes:
+                    c.execute(text(f"ALTER TABLE {tabla_n} ADD COLUMN {col} {tipo}"))
     return eng
 
 
@@ -126,6 +146,77 @@ def registrar_usuario(u):
                 correo=u["correo"], nombre=u["nombre"], matricula=u["matricula"],
                 telefono=u["telefono"], rol=u["rol"], primer_acceso=ahora(),
                 ultimo_acceso=ahora(), accesos=1))
+
+
+# ------------------------------------------------------------------ cuentas y teléfonos
+def _hash(clave, sal):
+    return hashlib.pbkdf2_hmac("sha256", clave.encode(), bytes.fromhex(sal), 200_000).hex()
+
+
+def usuario(correo):
+    with motor().connect() as c:
+        r = c.execute(select(usuarios).where(usuarios.c.correo == correo)).mappings().first()
+    return dict(r) if r else None
+
+
+def crear_cuenta(u, clave):
+    """Crea la cuenta. Regresa False si ese correo ya tiene cuenta con clave."""
+    actual = usuario(u["correo"])
+    if actual and actual.get("clave_hash"):
+        return False
+    sal = secrets.token_hex(16)
+    datos = dict(nombre=u["nombre"], matricula=u["matricula"], telefono=u["telefono"], rol=u["rol"],
+                 clave_sal=sal, clave_hash=_hash(clave, sal), ultimo_acceso=ahora())
+    with motor().begin() as c:
+        if actual:  # usuario de la versión anterior (sin clave): le ponemos clave
+            c.execute(update(usuarios).where(usuarios.c.correo == u["correo"]).values(**datos))
+        else:
+            c.execute(usuarios.insert().values(correo=u["correo"], primer_acceso=ahora(), accesos=0, **datos))
+    return True
+
+
+def verificar_clave(correo, clave):
+    u = usuario(correo)
+    if not u or not u.get("clave_hash"):
+        return None
+    return u if hmac.compare_digest(_hash(clave, u["clave_sal"]), u["clave_hash"]) else None
+
+
+def correo_de_dispositivo(disp):
+    with motor().connect() as c:
+        return c.execute(select(dispositivos.c.correo).where(dispositivos.c.id == disp)).scalar()
+
+
+def dispositivo_activo(correo):
+    with motor().connect() as c:
+        return c.execute(select(usuarios.c.dispositivo_activo).where(usuarios.c.correo == correo)).scalar()
+
+
+def activar_dispositivo(correo, disp, rol=None):
+    """Abre la cuenta en este teléfono (y la cierra en cualquier otro)."""
+    valores = dict(dispositivo_activo=disp, sesion_desde=ahora(), ultimo_acceso=ahora(),
+                   accesos=usuarios.c.accesos + 1)
+    if rol:
+        valores["rol"] = rol
+    with motor().begin() as c:
+        c.execute(update(usuarios).where(usuarios.c.correo == correo).values(**valores))
+        r = c.execute(update(dispositivos).where(dispositivos.c.id == disp)
+                      .values(correo=correo, ultimo_uso=ahora()))
+        if r.rowcount == 0:
+            c.execute(dispositivos.insert().values(id=disp, correo=correo, ultimo_uso=ahora()))
+
+
+def liberar_dispositivo(correo, disp):
+    """Cierra la sesión en este teléfono (queda libre para abrirla en otro)."""
+    with motor().begin() as c:
+        c.execute(update(usuarios).where(usuarios.c.correo == correo,
+                                         usuarios.c.dispositivo_activo == disp)
+                  .values(dispositivo_activo=None))
+
+
+def olvidar_dispositivo(disp):
+    with motor().begin() as c:
+        c.execute(dispositivos.delete().where(dispositivos.c.id == disp))
 
 
 def guardar_viaje(**datos):
@@ -215,4 +306,5 @@ TABLAS = {"usuarios": usuarios, "viajes": viajes, "matches": matches, "mensajes"
 def tabla(nombre):
     t = TABLAS[nombre]
     orden = t.c.ultimo_acceso if nombre == "usuarios" else t.c.creado
-    return pd.read_sql(select(t).order_by(orden.desc()), motor())
+    df = pd.read_sql(select(t).order_by(orden.desc()), motor())
+    return df.drop(columns=["clave_hash", "clave_sal", "dispositivo_activo"], errors="ignore")

@@ -13,6 +13,7 @@ Un solo comando:  streamlit run app_globalride.py
 import datetime as dt
 import json
 import re
+import secrets
 import urllib.parse
 
 import folium
@@ -20,7 +21,7 @@ import joblib
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
-from streamlit_js_eval import get_geolocation
+from streamlit_js_eval import get_geolocation, streamlit_js_eval
 
 import ags_datos as ags
 import db
@@ -154,7 +155,159 @@ def validar(correo, matricula, telefono, nombre):
     return errores, tel
 
 
+def id_dispositivo():
+    """Identificador fijo de este teléfono/navegador, guardado en su memoria local.
+    Sirve para recordar la cuenta y para que cada cuenta esté abierta en un solo teléfono."""
+    if st.session_state.get("_disp"):
+        return st.session_state["_disp"]
+    js = ("(function(){try{var k='globalride_dispositivo',d=localStorage.getItem(k);"
+          "if(!d){d=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():"
+          "(Date.now().toString(16)+Math.random().toString(16).slice(2));localStorage.setItem(k,d);}"
+          "return d;}catch(e){return 'sin-memoria';}})()")
+    v = streamlit_js_eval(js_expressions=js, key="gr_disp_js")
+    if v == "sin-memoria":  # navegador en modo privado: solo vale para esta visita
+        st.session_state["_disp"] = "tmp-" + secrets.token_hex(8)
+    elif v:
+        st.session_state["_disp"] = str(v)[:64]
+    return st.session_state.get("_disp")
+
+
+def abrir_sesion(u, disp, rol):
+    db.activar_dispositivo(u["correo"], disp, rol)
+    st.session_state.usuario = {"correo": u["correo"], "nombre": u["nombre"], "matricula": u["matricula"],
+                                "telefono": u["telefono"], "rol": rol}
+    st.session_state.pop("_transferir", None)
+    st.session_state.pop("_otra_cuenta", None)
+    st.rerun()
+
+
+def intentar_entrar(u, disp, rol):
+    """Entra solo si la cuenta no está abierta en otro teléfono."""
+    activo = u.get("dispositivo_activo")
+    if activo and activo != disp:
+        st.session_state["_transferir"] = (u["correo"], rol)
+        st.rerun()
+    abrir_sesion(u, disp, rol)
+
+
+def demasiados_intentos():
+    bloqueo = st.session_state.get("_bloqueo_hasta")
+    if bloqueo and dt.datetime.now() < bloqueo:
+        st.error(f"Demasiados intentos. Espera {int((bloqueo - dt.datetime.now()).total_seconds()) + 1} "
+                 "segundos e intenta de nuevo.")
+        return True
+    return False
+
+
+def clave_incorrecta():
+    st.session_state["_fallos"] = st.session_state.get("_fallos", 0) + 1
+    if st.session_state["_fallos"] >= 5:
+        st.session_state["_fallos"] = 0
+        st.session_state["_bloqueo_hasta"] = dt.datetime.now() + dt.timedelta(seconds=60)
+    st.error("Correo o clave incorrectos.")
+
+
+ROLES = ["🙋 Busco ride", "🚘 Doy ride"]
+
+
+def rol_de(texto):
+    return "pasajero" if "Busco" in texto else "conductor"
+
+
+def form_bienvenida(u, disp):
+    """Teléfono conocido: solo se pide la clave."""
+    with st.form("bienvenida"):
+        st.markdown(f"""<div class="gr-driver" style="margin-bottom:.6rem">
+          <div class="gr-avatar">{iniciales(u['nombre'])}</div>
+          <div><div class="gr-step-t">Hola de nuevo, {u['nombre'].split()[0]} 👋</div>
+          <span class="gr-muted">{u['correo']}</span></div></div>""", unsafe_allow_html=True)
+        st.text_input("Correo", value=u["correo"], disabled=True, autocomplete="username",
+                      label_visibility="collapsed")
+        clave = st.text_input("Tu clave", type="password", autocomplete="current-password",
+                              placeholder="Escribe tu clave")
+        rol = st.radio("¿Qué vas a hacer hoy?", ROLES, horizontal=True,
+                       index=1 if u.get("rol") == "conductor" else 0)
+        entrar = st.form_submit_button("Entrar →", use_container_width=True)
+    st.caption("💡 En iPhone: cuando Safari te ofrezca **guardar la contraseña**, acepta. "
+               "Las siguientes veces la llena solito con **Face ID**.")
+    if entrar and not demasiados_intentos():
+        if db.verificar_clave(u["correo"], clave):
+            intentar_entrar(db.usuario(u["correo"]), disp, rol_de(rol))
+        else:
+            clave_incorrecta()
+    if st.button("No soy yo · usar otra cuenta", use_container_width=True):
+        st.session_state["_otra_cuenta"] = True
+        st.rerun()
+
+
+def form_crear(disp):
+    with st.form("crear"):
+        st.caption("Solo la primera vez. Después solo te pediremos tu clave.")
+        correo = st.text_input("Correo institucional", placeholder=f"tu.matricula@{DOMINIO}",
+                               autocomplete="username")
+        nombre = st.text_input("¿Cómo te llamas?", placeholder="Nombre y apellido")
+        c1, c2 = st.columns(2)
+        matricula = c1.text_input("ID / matrícula", placeholder="Ej. GU24AB0000")
+        telefono = c2.text_input("Teléfono", placeholder="449 123 4567")
+        c3, c4 = st.columns(2)
+        clave = c3.text_input("Crea una clave", type="password", autocomplete="new-password",
+                              placeholder="Mínimo 6 caracteres")
+        clave2 = c4.text_input("Repite la clave", type="password", autocomplete="new-password")
+        rol = st.radio("¿Qué vas a hacer hoy?", ROLES, horizontal=True)
+        acepto = st.checkbox("Acepto compartir mi teléfono solo con mis matches confirmados.")
+        crear = st.form_submit_button("Crear mi cuenta →", use_container_width=True)
+    if crear:
+        errores, tel = validar(correo, matricula, telefono, nombre)
+        if len(clave) < 6:
+            errores.append("La clave debe tener al menos 6 caracteres.")
+        elif clave != clave2:
+            errores.append("Las dos claves no coinciden.")
+        if not acepto:
+            errores.append("Debes aceptar el uso de tu teléfono para coordinar viajes.")
+        if errores:
+            for e in errores:
+                st.error(e)
+            return
+        u = {"correo": correo.strip().lower(), "nombre": nombre.strip().title(),
+             "matricula": matricula.strip().upper(), "telefono": tel, "rol": rol_de(rol)}
+        if not db.crear_cuenta(u, clave):
+            st.error("Ya existe una cuenta con ese correo. Entra en la pestaña **🔑 Ya tengo cuenta**.")
+            return
+        abrir_sesion(db.usuario(u["correo"]), disp, u["rol"])
+
+
+def form_entrar(disp):
+    with st.form("entrar"):
+        correo = st.text_input("Correo institucional", placeholder=f"tu.matricula@{DOMINIO}",
+                               autocomplete="username")
+        clave = st.text_input("Clave", type="password", autocomplete="current-password")
+        rol = st.radio("¿Qué vas a hacer hoy?", ROLES, horizontal=True, key="rol_entrar")
+        entrar = st.form_submit_button("Entrar →", use_container_width=True)
+    if entrar and not demasiados_intentos():
+        u = db.verificar_clave(correo.strip().lower(), clave)
+        if u:
+            intentar_entrar(u, disp, rol_de(rol))
+        else:
+            clave_incorrecta()
+
+
+def aviso_otro_telefono(disp):
+    correo, rol = st.session_state["_transferir"]
+    st.error("🔒 **Tu cuenta ya está abierta en otro teléfono.** Por seguridad, cada cuenta solo puede "
+             "estar abierta en un teléfono a la vez.")
+    st.markdown("Cierra sesión en el otro teléfono y vuelve a intentar. Si ya no lo tienes a la mano "
+                "(o lo perdiste), puedes cerrarla desde aquí:")
+    a, b = st.columns(2)
+    if a.button("Cerrar la sesión del otro teléfono y entrar aquí", type="primary", use_container_width=True):
+        abrir_sesion(db.usuario(correo), disp, rol)
+    if b.button("Cancelar", use_container_width=True):
+        st.session_state.pop("_transferir", None)
+        st.rerun()
+
+
 def pantalla_acceso():
+    mostrar_aviso()
+    disp = id_dispositivo()
     izq, der = st.columns([1.15, 1], gap="large")
     with izq:
         st.markdown("""
@@ -176,38 +329,26 @@ def pantalla_acceso():
         """, unsafe_allow_html=True)
 
     with der:
-        with st.form("acceso"):
-            st.markdown("### Entra a tu cuenta")
-            st.caption("Verificamos que seas parte de la comunidad universitaria.")
-            correo = st.text_input("Correo institucional", placeholder=f"tu.matricula@{DOMINIO}")
-            nombre = st.text_input("¿Cómo te llamas?", placeholder="Nombre y apellido")
-            c1, c2 = st.columns(2)
-            matricula = c1.text_input("ID / matrícula", placeholder="Ej. GU24AB0000")
-            telefono = c2.text_input("Teléfono", placeholder="449 123 4567")
-            rol = st.radio("¿Qué vas a hacer hoy?", ["🙋 Busco ride", "🚘 Doy ride"], horizontal=True)
-            acepto = st.checkbox("Acepto compartir mi teléfono solo con mis matches confirmados.")
-            entrar = st.form_submit_button("Entrar a GlobalRide →", use_container_width=True)
-
-        if entrar:
-            errores, tel = validar(correo, matricula, telefono, nombre)
-            if not acepto:
-                errores.append("Debes aceptar el uso de tu teléfono para coordinar viajes.")
-            if errores:
-                for e in errores:
-                    st.error(e)
-            else:
-                usuario = {
-                    "correo": correo.strip().lower(), "nombre": nombre.strip().title(),
-                    "matricula": matricula.strip().upper(), "telefono": tel,
-                    "rol": "pasajero" if "Busco" in rol else "conductor",
-                }
-                try:
-                    db.registrar_usuario(usuario)
-                except Exception as e:
-                    st.error(f"No pudimos guardar tu registro, intenta de nuevo. ({e.__class__.__name__})")
-                    return
-                st.session_state.usuario = usuario
+        if not disp:
+            st.info("⏳ Preparando tu cuenta en este teléfono…")
+            if st.button("¿No carga? Toca aquí"):
+                st.session_state["_disp"] = "tmp-" + secrets.token_hex(8)
                 st.rerun()
+            return
+        if st.session_state.get("_transferir"):
+            aviso_otro_telefono(disp)
+            return
+        recordado = None if st.session_state.get("_otra_cuenta") else db.correo_de_dispositivo(disp)
+        u = db.usuario(recordado) if recordado else None
+        if u and u.get("clave_hash"):
+            form_bienvenida(u, disp)
+            return
+        st.markdown("### Bienvenida/o a GlobalRide")
+        t_crear, t_entrar = st.tabs(["✨ Crear cuenta", "🔑 Ya tengo cuenta"])
+        with t_crear:
+            form_crear(disp)
+        with t_entrar:
+            form_entrar(disp)
 
 
 # ------------------------------------------------------------------ mapa
@@ -611,8 +752,19 @@ def vista_conductor(precio, tipo_gas):
 
 
 # ------------------------------------------------------------------ app
+def sigue_en_este_telefono():
+    return db.dispositivo_activo(st.session_state.usuario["correo"]) == st.session_state.get("_disp")
+
+
 def app():
     u = st.session_state.usuario
+    if not sigue_en_este_telefono():
+        disp = st.session_state.get("_disp")
+        st.session_state.clear()
+        st.session_state["_disp"] = disp
+        st.session_state["_aviso"] = ("🔒 Tu cuenta se abrió en otro teléfono, por eso cerramos la sesión aquí.",
+                                      False)
+        st.rerun()
     mostrar_aviso()
 
     with st.sidebar:
@@ -623,8 +775,12 @@ def app():
         st.caption("Referencia Ags: Magna $23.79 · Premium $25.94 (ene 2026). Cámbialo si subió o bajó.")
         st.divider()
         if st.button("Cerrar sesión", use_container_width=True):
+            disp = st.session_state.get("_disp")
+            db.liberar_dispositivo(u["correo"], disp)
             st.session_state.clear()
+            st.session_state["_disp"] = disp
             st.rerun()
+        st.caption("Al cerrar sesión podrás abrir tu cuenta en otro teléfono.")
 
     h1, h2 = st.columns([3, 1.3])
     with h1:
@@ -759,6 +915,8 @@ def vista_matches(u, df):
 @st.fragment(run_every="5s")
 def chat(mid, yo, o, activo=True):
     """Chat del match. Se actualiza solo cada 5 segundos."""
+    if not sigue_en_este_telefono():
+        st.rerun()
     st.markdown(f"#### 💬 Chat con {o['nombre'].split()[0]}")
     caja = st.container(height=360)  # se llena al final, ya con el mensaje nuevo guardado
     if activo:
