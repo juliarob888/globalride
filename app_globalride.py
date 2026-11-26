@@ -11,6 +11,7 @@ Un solo comando:  streamlit run app_globalride.py
    Los datos de entrenamiento y los conductores de la demo son simulados.
 """
 import datetime as dt
+import importlib
 import json
 import re
 import secrets
@@ -25,6 +26,11 @@ from streamlit_js_eval import get_geolocation, streamlit_js_eval
 
 import ags_datos as ags
 import db
+
+# Streamlit Cloud a veces conserva en memoria la versión vieja de nuestros módulos
+# después de subir cambios a GitHub. Recargarlos asegura usar siempre la versión nueva.
+importlib.reload(ags)
+importlib.reload(db)
 
 st.set_page_config(page_title="GlobalRide", page_icon="🚗", layout="wide",
                    initial_sidebar_state="collapsed")

@@ -107,9 +107,19 @@ def _url():
         return "sqlite:///globalride.db"
 
 
-@st.cache_resource
 def motor():
-    url = _url()
+    # La "huella" del esquema cambia cuando agregamos tablas o columnas; así, tras una
+    # actualización, se crea una conexión nueva y se aplican los cambios a la base de datos.
+    huella = "|".join(f"{t.name}:{','.join(c.name for c in t.columns)}" for t in meta.sorted_tables)
+    return _motor(_url(), huella=huella)
+
+
+@st.cache_resource
+def _motor(url, huella):
+    return _crear_motor(url)
+
+
+def _crear_motor(url):
     if url.startswith("postgres://"):  # Supabase/Heroku a veces la dan así
         url = url.replace("postgres://", "postgresql://", 1)
     eng = create_engine(url, pool_pre_ping=True)
