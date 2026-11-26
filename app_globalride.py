@@ -19,6 +19,7 @@ import joblib
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
+from streamlit_js_eval import get_geolocation
 
 import ags_datos as ags
 import db
@@ -92,6 +93,10 @@ h1,h2,h3,h4{font-family:'Space Grotesk',sans-serif !important; letter-spacing:-.
 .stTabs [data-baseweb="tab"]{background:var(--card); border-radius:12px; padding:.4rem 1rem; border:1px solid var(--borde);}
 .stTabs [aria-selected="true"]{background:linear-gradient(90deg,rgba(139,92,246,.35),rgba(236,72,153,.35));}
 iframe{border-radius:20px;}
+.gr-step{display:flex; gap:.8rem; align-items:center; margin:1.4rem 0 .6rem;}
+.gr-step>b{width:38px; height:38px; border-radius:12px; display:grid; place-items:center; flex-shrink:0;
+  font-family:'Space Grotesk'; font-size:1.1rem; background:linear-gradient(135deg,var(--morado),var(--rosa));}
+.gr-step-t{font-family:'Space Grotesk'; font-weight:700; font-size:1.3rem;}
 </style>""")
 
 
@@ -223,29 +228,89 @@ def link_google_maps(origen, destino, paradas=()):
     return url
 
 
-def dibujar_mapa(m, clave):
-    salida = st_folium(m, key=clave, height=520, use_container_width=True,
+def dibujar_mapa(m, clave, alto=460):
+    salida = st_folium(m, key=clave, height=alto, use_container_width=True,
                        returned_objects=["last_clicked"])
     clic = (salida or {}).get("last_clicked")
     if clic:
         punto = (round(clic["lat"], 5), round(clic["lng"], 5))
-        if st.session_state.get(f"{clave}_punto") != punto:
-            st.session_state[f"{clave}_punto"] = punto
+        # Solo cuenta como nuevo si es un clic distinto al último (así no pisa lo elegido en la lista)
+        if st.session_state.get(f"{clave}_ultimo_clic") != punto:
+            st.session_state[f"{clave}_ultimo_clic"] = punto
+            fijar_punto(clave, punto, "El punto que marcaste en el mapa")
             st.rerun()
 
 
-# ------------------------------------------------------------------ panel común
-def ajustes_viaje(prefijo):
-    campus = ags.CAMPUS_NOMBRE
-    c1, c2, c3 = st.columns(3)
-    c1.markdown(f"""<div class="gr-card" style="padding:.6rem 1rem;margin:0">
-      <div class="gr-muted">🎓 Destino</div><b>{campus}</b>
-      <div class="gr-muted" style="font-size:.78rem">{ags.CAMPUS[campus]['direccion']}</div></div>""",
-                unsafe_allow_html=True)
+# ------------------------------------------------------------------ elegir ubicación fácil
+def fijar_punto(clave, punto, nombre):
+    st.session_state[f"{clave}_punto"] = punto
+    st.session_state[f"{clave}_lugar"] = nombre
+    st.session_state[f"{clave}_aviso"] = None
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def buscar_cache(texto):
+    return ags.buscar_direccion(texto)
+
+
+def paso(n, texto, sub=""):
+    st.markdown(f"""<div class="gr-step"><b>{n}</b><div><div class="gr-step-t">{texto}</div>
+      <div class="gr-muted">{sub}</div></div></div>""", unsafe_allow_html=True)
+
+
+def selector_ubicacion(clave, texto_busqueda):
+    """Tres formas fáciles de elegir el lugar; el mapa se mueve solo. También se puede tocar el mapa."""
+    def al_elegir_punto():
+        sel = st.session_state.get(f"{clave}_sel")
+        if sel:
+            p = next(p for p in ags.PUNTOS if p["nombre"] == sel)
+            fijar_punto(clave, p["coord"], p["nombre"])
+
+    def al_buscar():
+        txt = st.session_state.get(f"{clave}_dir", "").strip()
+        if len(txt) < 3:
+            return
+        r = buscar_cache(txt)
+        if r:
+            fijar_punto(clave, (round(r[0], 5), round(r[1], 5)), r[2])
+        else:
+            st.session_state[f"{clave}_aviso"] = (f"No encontramos «{txt}». Prueba con el nombre de tu colonia "
+                                                  "o una calle conocida, o toca el mapa.")
+
+    c1, c2, c3 = st.columns([1.1, 1.3, .8], vertical_alignment="bottom")
+    c1.selectbox("🚏 Elige un punto de encuentro", [p["nombre"] for p in ags.PUNTOS], index=None,
+                 placeholder="Toca para ver la lista", key=f"{clave}_sel", on_change=al_elegir_punto)
+    c2.text_input(f"🔎 {texto_busqueda}", placeholder="Ej. Pozo Bravo, Ojocaliente, Av. Convención",
+                  key=f"{clave}_dir", on_change=al_buscar)
+    if c3.button("📍 Usar mi ubicación", key=f"{clave}_gps_btn", use_container_width=True):
+        st.session_state[f"{clave}_gps"] = True
+
+    if st.session_state.get(f"{clave}_gps"):
+        geo = get_geolocation(component_key=f"{clave}_geo")
+        if geo and "coords" in geo:
+            st.session_state[f"{clave}_gps"] = False
+            fijar_punto(clave, (round(geo["coords"]["latitude"], 5), round(geo["coords"]["longitude"], 5)),
+                        "Tu ubicación actual")
+            st.rerun()
+        elif geo and "error" in geo:
+            st.session_state[f"{clave}_gps"] = False
+            st.session_state[f"{clave}_aviso"] = ("No pudimos leer tu ubicación. Dale permiso de ubicación a tu "
+                                                  "navegador, o elige el lugar de otra forma.")
+        else:
+            st.caption("📡 Buscando tu ubicación… si el navegador te pregunta, toca **Permitir**.")
+
+    if st.session_state.get(f"{clave}_aviso"):
+        st.warning(st.session_state[f"{clave}_aviso"])
+    elif st.session_state.get(f"{clave}_lugar"):
+        st.success(f"📍 **{st.session_state[f'{clave}_lugar']}** · ¿No es ahí? Toca el mapa para ajustarlo.")
+
+
+def cuando(prefijo):
+    c1, c2 = st.columns(2)
     hoy = dt.date.today().weekday()
-    dia = c2.selectbox("Día", DIAS, index=hoy if hoy < 5 else 0, key=f"{prefijo}_dia")
-    hora = c3.time_input("Hora de salida", dt.time(7, 30), step=900, key=f"{prefijo}_hora")
-    return campus, dia, hora
+    dia = c1.selectbox("Día", DIAS, index=hoy if hoy < 5 else 0, key=f"{prefijo}_dia")
+    hora = c2.time_input("Hora de salida", dt.time(7, 30), step=900, key=f"{prefijo}_hora")
+    return dia, hora
 
 
 def bloque_tarifa(km, minutos, real, t, precio, tipo_gas, titulo="Tu cooperación"):
@@ -274,55 +339,57 @@ def prob_match(zona_origen, zona_destino, km, desvio, hora, dif, dia, asientos, 
     return float(cargar_modelo().predict_proba(fila)[0][1])
 
 
+def pin_marker(m, punto, emoji, color, tam, texto):
+    folium.Marker(punto, tooltip=texto,
+                  icon=folium.DivIcon(html=_pin(emoji, color, tam), icon_size=(tam, tam),
+                                      icon_anchor=(tam // 2, tam // 2))).add_to(m)
+
+
 # ------------------------------------------------------------------ pasajero
 def vista_pasajero(precio, tipo_gas):
-    campus, dia, hora = ajustes_viaje("p")
+    campus = ags.CAMPUS_NOMBRE
     destino = ags.CAMPUS[campus]["coord"]
+
+    paso(1, "¿Dónde te recogen?", "Elige la forma que se te haga más fácil, o toca el mapa.")
+    selector_ubicacion("mapa_p", "O escribe tu colonia o calle")
     yo = st.session_state.get("mapa_p_punto")
 
+    if not yo:
+        dibujar_mapa(mapa_base(), "mapa_p")
+        st.caption("🟣 Campus · 🔵 Puntos de encuentro seguros")
+        return
+
+    lugar = st.session_state.get("mapa_p_lugar") or "Tu ubicación"
     col_mapa, col_info = st.columns([1.6, 1], gap="large")
     with col_info:
-        if not yo:
-            st.markdown("""
-            <div class="gr-card"><h4>¿Dónde estás?</h4>
-              <div class="gr-paso"><b>1</b> Toca el mapa donde estás (tu casa, tu depa…)</div>
-              <div class="gr-paso"><b>2</b> Te mostramos el punto seguro más cercano para que te recojan</div>
-              <div class="gr-paso"><b>3</b> Ves cuánto te toca de gas y eliges conductor</div>
-            </div>""", unsafe_allow_html=True)
-        else:
-            cercanos = ags.puntos_cercanos(yo, 3)
-            opciones = ["📍 Que pasen por mí aquí"] + [f"{p['nombre']} · {p['dist'] * 1000:.0f} m a pie"
-                                                      for p in cercanos]
-            sel = st.radio("¿Dónde te recogen?", opciones, index=1 if cercanos[0]["dist"] < 1.2 else 0)
-            recogida = yo if sel == opciones[0] else cercanos[opciones.index(sel) - 1]["coord"]
-            nombre_recogida = "Tu ubicación" if sel == opciones[0] else cercanos[opciones.index(sel) - 1]["nombre"]
-
-            linea, km, minutos, real = ruta_cache(recogida, destino)
-            t = ags.tarifa(km, precio, 14, pasajeros=1)
-            bloque_tarifa(km, minutos, real, t, precio, tipo_gas)
-            st.link_button("🗺️ Abrir ruta en Google Maps", link_google_maps(recogida, destino),
-                           use_container_width=True)
+        cercanos = [p for p in ags.puntos_cercanos(yo, 4) if p["dist"] > 0.05][:3]
+        opciones = [f"📍 Aquí: {lugar}"] + [f"🚏 {p['nombre']} · {p['dist'] * 1000:.0f} m a pie" for p in cercanos]
+        sel = st.radio("Confirma dónde te recogen", opciones, index=0,
+                       help="Si prefieres, camina a un punto de encuentro seguro cercano.")
+        i = opciones.index(sel)
+        recogida = yo if i == 0 else cercanos[i - 1]["coord"]
+        nombre_recogida = lugar if i == 0 else cercanos[i - 1]["nombre"]
+        linea, km, minutos, real = ruta_cache(recogida, destino)
+        t = ags.tarifa(km, precio, 14, pasajeros=1)
+        bloque_tarifa(km, minutos, real, t, precio, tipo_gas)
+        st.link_button("🗺️ Abrir ruta en Google Maps", link_google_maps(recogida, destino),
+                       use_container_width=True)
 
     with col_mapa:
         m = mapa_base()
-        if yo:
-            folium.Marker(yo, tooltip="Tú estás aquí",
-                          icon=folium.DivIcon(html=_pin("🙋", "#ec4899", 34), icon_size=(34, 34),
-                                              icon_anchor=(17, 17))).add_to(m)
-            folium.PolyLine(linea, color="#c6f432", weight=5, opacity=.9).add_to(m)
-            if recogida != yo:
-                folium.PolyLine([yo, recogida], color="#ec4899", weight=3, dash_array="6 8").add_to(m)
-                folium.Marker(recogida, tooltip=f"Te recogen en: {nombre_recogida}",
-                              icon=folium.DivIcon(html=_pin("🚏", "#c6f432", 32), icon_size=(32, 32),
-                                                  icon_anchor=(16, 16))).add_to(m)
-            m.fit_bounds([yo, destino], padding=(40, 40))
+        pin_marker(m, yo, "🙋", "#ec4899", 34, f"Tú: {lugar}")
+        folium.PolyLine(linea, color="#c6f432", weight=5, opacity=.9).add_to(m)
+        if recogida != yo:
+            folium.PolyLine([yo, recogida], color="#ec4899", weight=3, dash_array="6 8").add_to(m)
+            pin_marker(m, recogida, "🚏", "#c6f432", 32, f"Te recogen en: {nombre_recogida}")
+        m.fit_bounds([yo, destino], padding=(40, 40))
         dibujar_mapa(m, "mapa_p")
-        st.caption("🟣 Campus · 🔵 Puntos de encuentro · Toca el mapa para cambiar tu ubicación.")
+        st.caption("🟣 Campus · 🔵 Puntos de encuentro · 🟢 Ruta al campus")
 
-    if not yo:
-        return
+    paso(2, "¿Cuándo vas?", f"🎓 {campus} · {ags.CAMPUS[campus]['direccion']}")
+    dia, hora = cuando("p")
 
-    st.markdown(f"### Conductores que van a {campus} 🚘")
+    paso(3, "Tus matches", "Ordenados por la probabilidad de match que calcula la IA.")
     hora_dec = a_decimal(hora)
     zona_o = ags.zona_de(recogida)
     correo = st.session_state.usuario["correo"]
@@ -339,23 +406,8 @@ def vista_pasajero(precio, tipo_gas):
     cols = st.columns(2)
     for i, (p, c, tc) in enumerate(lista):
         with cols[i % 2]:
-            badge = ('<span class="gr-badge gr-ok">🔥 Match recomendado</span>' if p >= .5
-                     else '<span class="gr-badge gr-meh">Match poco probable</span>')
-            st.markdown(f"""
-            <div class="gr-card">
-              <div class="gr-driver">
-                <div class="gr-avatar">{c['nombre'][:2].upper()}</div>
-                <div style="flex:1">
-                  <b>{c['nombre']}</b> · <span class="gr-muted">{c['carrera']}</span><br>
-                  <span class="gr-muted">⭐ {c['calificacion']} · {c['auto']} · {c['asientos']} lugar(es) · sale {a_hora(c['hora'])}</span>
-                </div>
-                <div style="text-align:right"><b style="font-size:1.4rem">${tc['por_pasajero']}</b></div>
-              </div>
-              <div style="margin-top:.7rem;display:flex;justify-content:space-between;align-items:center">
-                {badge}<span class="gr-muted">IA: {p * 100:.0f}% de match</span>
-              </div>
-              <div class="gr-bar"><i style="width:{p * 100:.0f}%"></i></div>
-            </div>""", unsafe_allow_html=True)
+            tarjeta_conductor(c["nombre"], c["carrera"], f"⭐ {c['calificacion']} · {c['auto']} · "
+                              f"{c['asientos']} lugar(es) · sale {a_hora(c['hora'])}", tc["por_pasajero"], p)
             if st.button(f"Pedir ride con {c['nombre']}", key=f"pedir_{i}", use_container_width=True,
                          type="primary" if i == 0 else "secondary"):
                 db.guardar_viaje(
@@ -368,79 +420,91 @@ def vista_pasajero(precio, tipo_gas):
                 st.balloons()
 
 
+def tarjeta_conductor(nombre, sub, detalle, precio, p, etiqueta=""):
+    badge = ('<span class="gr-badge gr-ok">🔥 Match recomendado</span>' if p >= .5
+             else '<span class="gr-badge gr-meh">Match poco probable</span>')
+    st.markdown(f"""
+    <div class="gr-card">
+      <div class="gr-driver">
+        <div class="gr-avatar">{nombre[:2].upper()}</div>
+        <div style="flex:1">
+          <b>{nombre}</b> · <span class="gr-muted">{sub}</span> {etiqueta}<br>
+          <span class="gr-muted">{detalle}</span>
+        </div>
+        <div style="text-align:right"><b style="font-size:1.4rem">${precio}</b></div>
+      </div>
+      <div style="margin-top:.7rem;display:flex;justify-content:space-between;align-items:center">
+        {badge}<span class="gr-muted">IA: {p * 100:.0f}% de match</span>
+      </div>
+      <div class="gr-bar"><i style="width:{p * 100:.0f}%"></i></div>
+    </div>""", unsafe_allow_html=True)
+
+
 # ------------------------------------------------------------------ conductor
 def vista_conductor(precio, tipo_gas):
-    campus, dia, hora = ajustes_viaje("c")
+    campus = ags.CAMPUS_NOMBRE
     destino = ags.CAMPUS[campus]["coord"]
+
+    paso(1, "¿De dónde sales?", "Elige la forma que se te haga más fácil, o toca el mapa.")
+    selector_ubicacion("mapa_c", "O escribe de dónde sales")
+    salida = st.session_state.get("mapa_c_punto")
+    if not salida:
+        dibujar_mapa(mapa_base(), "mapa_c")
+        st.caption("🟣 Campus · 🔵 Puntos de encuentro seguros")
+        return
+
+    paso(2, "¿Cuándo vas y cuántos lugares tienes?", f"🎓 {campus} · {ags.CAMPUS[campus]['direccion']}")
+    dia, hora = cuando("c")
     c1, c2, c3 = st.columns(3)
     asientos = c1.slider("Lugares libres", 1, 4, 3)
     rendimiento = c2.slider("Rendimiento de tu auto (km/L)", 8, 22, 14)
     radio = c3.slider("Desvío máximo para recoger (km)", 0.3, 3.0, 1.0, 0.1)
-    salida = st.session_state.get("mapa_c_punto")
 
-    col_mapa, col_info = st.columns([1.6, 1], gap="large")
+    linea, km, minutos, real = ruta_cache(salida, destino)
     paradas = []
-    if salida:
-        linea, km, minutos, real = ruta_cache(salida, destino)
-        for p in ags.PUNTOS:
-            d = ags.distancia_a_ruta(p["coord"], linea)
-            if d <= radio:
-                paradas.append(dict(p, desvio=d, esperando=ags.pasajeros_esperando(p["nombre"])))
-        # ordenar en el sentido del viaje: lo más lejos del campus primero
-        paradas.sort(key=lambda p: -ags.distancia_km(p["coord"], destino))
-        reales = []
-        for _, r in db.pasajeros_esperando(dia).iterrows():
-            punto = (r["recogida_lat"], r["recogida_lon"])
-            d = ags.distancia_a_ruta(punto, linea)
-            if d <= radio:
-                reales.append({"nombre": r["nombre"], "lugar": r["recogida_nombre"], "coord": punto,
-                               "hora": r["hora"], "desvio": d})
-        interesados = sum(len(p["esperando"]) for p in paradas) + len(reales)
-        llevar = min(asientos, interesados)
-        t = ags.tarifa(km, precio, rendimiento, pasajeros=max(1, llevar))
+    for p in ags.PUNTOS:
+        d = ags.distancia_a_ruta(p["coord"], linea)
+        if d <= radio:
+            paradas.append(dict(p, desvio=d, esperando=ags.pasajeros_esperando(p["nombre"])))
+    paradas.sort(key=lambda p: -ags.distancia_km(p["coord"], destino))  # en el sentido del viaje
+    reales = []
+    for _, r in db.pasajeros_esperando(dia).iterrows():
+        punto = (r["recogida_lat"], r["recogida_lon"])
+        d = ags.distancia_a_ruta(punto, linea)
+        if d <= radio:
+            reales.append({"nombre": r["nombre"], "lugar": r["recogida_nombre"], "coord": punto,
+                           "hora": r["hora"], "desvio": d})
+    interesados = sum(len(p["esperando"]) for p in paradas) + len(reales)
+    llevar = min(asientos, interesados)
+    t = ags.tarifa(km, precio, rendimiento, pasajeros=max(1, llevar))
 
+    paso(3, "Tu ruta y a quién puedes recoger", "🟢 Paradas sobre tu ruta · 🩷 Estudiantes que pidieron ride")
+    col_mapa, col_info = st.columns([1.6, 1], gap="large")
     with col_info:
-        if not salida:
-            st.markdown("""
-            <div class="gr-card"><h4>¿De dónde sales?</h4>
-              <div class="gr-paso"><b>1</b> Toca el mapa en tu punto de salida</div>
-              <div class="gr-paso"><b>2</b> Trazamos tu ruta al campus</div>
-              <div class="gr-paso"><b>3</b> Te marcamos dónde puedes pasar por gente y cuánto recuperas de gas</div>
-            </div>""", unsafe_allow_html=True)
-        else:
-            bloque_tarifa(km, minutos, real, t, precio, tipo_gas, titulo="Cada pasajero te coopera")
-            m1, m2 = st.columns(2)
-            m1.metric("Recuperas", f"${t['por_pasajero'] * llevar}", f"{llevar} pasajero(s)")
-            m2.metric("Gas del viaje", f"${t['gasolina']:.0f}")
-            con_gente = [r["coord"] for r in reales] + [p["coord"] for p in paradas if p["esperando"]]
-            st.link_button("🗺️ Navegar con Google Maps (con paradas)",
-                           link_google_maps(salida, destino, con_gente), use_container_width=True)
+        bloque_tarifa(km, minutos, real, t, precio, tipo_gas, titulo="Cada pasajero te coopera")
+        m1, m2 = st.columns(2)
+        m1.metric("Recuperas", f"${t['por_pasajero'] * llevar}", f"{llevar} pasajero(s)")
+        m2.metric("Gas del viaje", f"${t['gasolina']:.0f}")
+        con_gente = [r["coord"] for r in reales] + [p["coord"] for p in paradas if p["esperando"]]
+        st.link_button("🗺️ Navegar con Google Maps (con paradas)",
+                       link_google_maps(salida, destino, con_gente), use_container_width=True)
 
     with col_mapa:
         m = mapa_base()
-        if salida:
-            folium.PolyLine(linea, color="#c6f432", weight=5, opacity=.9).add_to(m)
-            folium.Circle(salida, radius=radio * 1000, color="#ec4899", fill=False, weight=1,
-                          dash_array="4 6").add_to(m)
-            folium.Marker(salida, tooltip="Sales de aquí",
-                          icon=folium.DivIcon(html=_pin("🚘", "#ec4899", 34), icon_size=(34, 34),
-                                              icon_anchor=(17, 17))).add_to(m)
-            for p in paradas:
-                folium.Marker(p["coord"], tooltip=f"🚏 {p['nombre']} · {len(p['esperando'])} esperando",
-                              icon=folium.DivIcon(html=_pin(str(len(p["esperando"])), "#c6f432", 26),
-                                                  icon_size=(26, 26), icon_anchor=(13, 13))).add_to(m)
-            for r in reales:
-                folium.Marker(r["coord"], tooltip=f"🙋 {r['nombre']} · {r['lugar']} · {r['hora']}",
-                              icon=folium.DivIcon(html=_pin("🙋", "#ec4899", 28), icon_size=(28, 28),
-                                                  icon_anchor=(14, 14))).add_to(m)
-            m.fit_bounds([salida, destino], padding=(40, 40))
+        folium.PolyLine(linea, color="#c6f432", weight=5, opacity=.9).add_to(m)
+        folium.Circle(salida, radius=radio * 1000, color="#ec4899", fill=False, weight=1,
+                      dash_array="4 6").add_to(m)
+        pin_marker(m, salida, "🚘", "#ec4899", 34, f"Sales de: {st.session_state.get('mapa_c_lugar', 'aquí')}")
+        for p in paradas:
+            pin_marker(m, p["coord"], str(len(p["esperando"])), "#c6f432", 26,
+                       f"🚏 {p['nombre']} · {len(p['esperando'])} esperando")
+        for r in reales:
+            pin_marker(m, r["coord"], "🙋", "#ec4899", 28, f"🙋 {r['nombre']} · {r['lugar']} · {r['hora']}")
+        m.fit_bounds([salida, destino], padding=(40, 40))
         dibujar_mapa(m, "mapa_c")
-        st.caption("🟢 Paradas sobre tu ruta (el número = estudiantes esperando) · Toca el mapa para cambiar tu salida.")
 
-    if not salida:
-        return
     if reales:
-        st.markdown("### Estudiantes que pidieron ride sobre tu ruta 🙋")
+        st.markdown("#### Estudiantes que pidieron ride sobre tu ruta 🙋")
         cols = st.columns(3)
         for i, r in enumerate(reales):
             with cols[i % 3]:
@@ -450,10 +514,9 @@ def vista_conductor(precio, tipo_gas):
                   <h4 style="margin-top:.5rem">{r['nombre']}</h4>
                   <div class="gr-muted">📍 {r['lugar']} · a {r['desvio'] * 1000:.0f} m de tu ruta</div>
                 </div>""", unsafe_allow_html=True)
-    st.markdown("### Dónde puedes pasar por ellos 🚏")
+    st.markdown("#### Dónde puedes pasar por ellos 🚏")
     if not paradas:
         st.info("No hay puntos de encuentro sobre tu ruta. Sube el desvío máximo para ver más opciones.")
-        return
     cols = st.columns(3)
     for i, p in enumerate(paradas):
         gente = ", ".join(f"{e['nombre']} ({e['carrera']})" for e in p["esperando"]) or "Nadie por ahora"

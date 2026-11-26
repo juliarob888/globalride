@@ -156,3 +156,39 @@ def pasajeros_esperando(punto_nombre):
     rng = random.Random("esperando:" + punto_nombre)
     return [{"nombre": n, "carrera": rng.choice(CARRERAS)}
             for n in rng.sample(NOMBRES, rng.randint(0, 3))]
+
+
+def buscar_direccion(texto):
+    """Convierte una colonia/calle escrita por el usuario en coordenadas (OpenStreetMap).
+    Solo busca dentro de Aguascalientes y alrededores. Devuelve (lat, lon, nombre) o None.
+    Prueba varias versiones del texto porque la gente escribe de muchas formas."""
+    import time
+    import unicodedata
+    import urllib.parse
+
+    texto = " ".join(texto.split())
+    sin_relleno = " ".join(w for w in texto.split()
+                           if w.lower() not in {"centro", "col", "col.", "colonia", "fracc", "fracc.", "y"})
+    intentos = [texto, f"{texto}, Aguascalientes", sin_relleno,
+                unicodedata.normalize("NFKD", sin_relleno).encode("ascii", "ignore").decode()]
+    vistos = set()
+    for q in intentos:
+        if not q or q in vistos:
+            continue
+        vistos.add(q)
+        params = urllib.parse.urlencode({
+            "q": q, "format": "json", "limit": 1, "countrycodes": "mx",
+            "viewbox": "-102.55,22.25,-102.05,21.65", "bounded": 1, "accept-language": "es",
+        })
+        try:
+            req = urllib.request.Request(f"https://nominatim.openstreetmap.org/search?{params}",
+                                         headers={"User-Agent": "globalride-demo"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                datos = json.load(r)
+        except Exception:
+            datos = []
+        if datos:
+            d = datos[0]
+            return float(d["lat"]), float(d["lon"]), ", ".join(d["display_name"].split(", ")[:3])
+        time.sleep(1)  # regla de uso de OpenStreetMap: máximo 1 consulta por segundo
+    return None
